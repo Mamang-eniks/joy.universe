@@ -1,7 +1,7 @@
 """
 JOY UNIVERSE — Discord Moderation Bot
 Author  : Niks. (Founder)
-Version : 1.0.0
+Version : 2.0.2
 
 "No mercy. No limits. Full control."
 
@@ -38,6 +38,10 @@ from emoji_config import (
     BADGE_FOUNDER, BADGE_DEVELOPER, BADGE_MANAGEMENT, BADGE_STAFF,
     BADGE_PREMIUM, BADGE_NOPREFIX, BADGE_USER,
     ICON_TICKET_OPEN, ICON_TICKET_CLOSE, ICON_GIVEAWAY_REACT,
+    ICON_MODERATION, ICON_ROLE, ICON_INFO, ICON_TICKET,
+    ICON_GIVEAWAY, ICON_ANTISPAM, ICON_OWNER,
+    ICON_SUCCESS, ICON_ERROR, ICON_WARNING,
+    ICON_WINNER, ICON_BADGES,
 )
 
 # ══════════════════════════════════════════════════════════════════
@@ -45,8 +49,8 @@ from emoji_config import (
 # ══════════════════════════════════════════════════════════════════
 
 BOT_NAME      = "JOY UNIVERSE"
-BOT_TAGLINE   = "No mercy. No limits. Full control."
-BOT_VERSION   = "1.0.0"
+BOT_TAGLINE   = "Nicturne Development."
+BOT_VERSION   = "2.0.2"
 BOT_PREFIX    = "!joy "
 CONFIG_PATH   = "data/config.json"
 WIB           = pytz.timezone("Asia/Jakarta")
@@ -181,10 +185,12 @@ def base_embed(title: str, description: str = "", color: int = COLOR_PRIMARY) ->
     return _footer(discord.Embed(title=title, description=description, color=color))
 
 def success_embed(desc: str) -> discord.Embed:
-    return base_embed("Success", desc, COLOR_SUCCESS)
+    icon = (ICON_SUCCESS + " ") if ICON_SUCCESS else "✅ "
+    return base_embed(icon + "Success", desc, COLOR_SUCCESS)
 
 def error_embed(desc: str) -> discord.Embed:
-    return base_embed("Error", desc, COLOR_ERROR)
+    icon = (ICON_ERROR + " ") if ICON_ERROR else "❌ "
+    return base_embed(icon + "Error", desc, COLOR_ERROR)
 
 def info_embed(title: str, desc: str) -> discord.Embed:
     return base_embed(title, desc, COLOR_INFO)
@@ -833,8 +839,9 @@ async def end_giveaway(gw: dict):
                         pass
             if assigned:
                 role_note = f"\nRole {win_role.mention} diberikan ke {assigned} pemenang."
+    win_icon  = (ICON_WINNER + " ") if ICON_WINNER else "🏆 "
     win_embed = discord.Embed(
-        title="Giveaway Winners!",
+        title=win_icon + "Giveaway Winners!",
         description=f"Selamat {winner_str}!\n\n**Prize:** {gw['prize']}{role_note}",
         color=COLOR_SUCCESS,
         timestamp=discord.utils.utcnow()
@@ -1155,7 +1162,8 @@ async def pfx_warnings(ctx, member: discord.Member = None):
         f"**{i+1}.** {w.get('reason','?')} *(by <@{w.get('warned_by','?')}> — {w.get('timestamp','')[:10]})*"
         for i, w in enumerate(warns)
     ]
-    embed = discord.Embed(title=f"Warnings — {target.display_name}", description="\n".join(lines), color=COLOR_WARNING)
+    icon = (ICON_WARNING + " ") if ICON_WARNING else "⚠️ "
+    embed = discord.Embed(title=icon + f"Warnings — {target.display_name}", description="\n".join(lines), color=COLOR_WARNING)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.set_footer(text=f"Total: {len(warns)} warning(s) • {BOT_NAME}")
     await ctx.send(embed=embed)
@@ -1812,10 +1820,11 @@ async def pfx_botrole(ctx, action: str = "", member: discord.Member = None, role
         bot_roles[str(member.id)] = role
         save_config(cfg)
         info = BOT_ROLE_BADGES[role]
-        embed = discord.Embed(title="Bot Role Assigned", description=f"{member.mention} → **{info['label']}**", color=info["color"], timestamp=discord.utils.utcnow())
+        badge_prefix = (info["emoji"] + " ") if info.get("emoji") else ""
+        embed = discord.Embed(title="Bot Role Assigned", description=f"{member.mention} → {badge_prefix}**{info['label']}**", color=info["color"], timestamp=discord.utils.utcnow())
         embed.set_thumbnail(url=member.display_avatar.url)
         try:
-            dm = discord.Embed(title="Bot Role Granted!", description=f"Kamu mendapat role **{info['label']}** di {BOT_NAME}!", color=info["color"])
+            dm = discord.Embed(title="Bot Role Granted!", description=f"Kamu mendapat role {badge_prefix}**{info['label']}** di {BOT_NAME}!", color=info["color"])
             await member.send(embed=dm)
         except Exception: pass
         await ctx.send(embed=embed)
@@ -2035,7 +2044,7 @@ async def pfx_vxleave(ctx, guild_id: str = ""):
 
 HELP_CATEGORIES = {
     "moderation": {
-        "label": "Moderation", "emoji": "🛡️",
+        "label": "Moderation", "emoji": ICON_MODERATION if ICON_MODERATION else "🛡️",
         "value": (
             "`kick` · `ban` · `unban` · `timeout` · `untimeout`\n"
             "`warn` · `warnings` · `unwarn` · `clearwarnings`\n"
@@ -2043,15 +2052,15 @@ HELP_CATEGORIES = {
         ),
     },
     "role": {
-        "label": "Role & Voice", "emoji": "🎭",
+        "label": "Role & Voice", "emoji": ICON_ROLE if ICON_ROLE else "🎭",
         "value": "`addrole` · `removerole` · `move`",
     },
     "info": {
-        "label": "Info", "emoji": "ℹ️",
+        "label": "Info", "emoji": ICON_INFO if ICON_INFO else "ℹ️",
         "value": "`userinfo` · `serverinfo` · `avatar` · `ping` · `addemoji`",
     },
     "ticket": {
-        "label": "Ticket", "emoji": "🎫",
+        "label": "Ticket", "emoji": ICON_TICKET if ICON_TICKET else "🎫",
         "value": (
             '`ticket setup <cat_id> <log_category_id> [role] [max]`\n'
             '`ticket panel "Judul" "Deskripsi"` — deskripsi opsional\n'
@@ -2070,15 +2079,15 @@ HELP_CATEGORIES = {
         ),
     },
     "giveaway": {
-        "label": "Giveaway", "emoji": "🎉",
+        "label": "Giveaway", "emoji": ICON_GIVEAWAY if ICON_GIVEAWAY else "🎉",
         "value": "`giveaway start/end/reroll/list`\nOptional: `--role <id>` · `--winrole <id>`",
     },
     "antispam": {
-        "label": "Antispam", "emoji": "🚫",
+        "label": "Antispam", "emoji": ICON_ANTISPAM if ICON_ANTISPAM else "🚫",
         "value": "`antispam setchannel #ch` · `antispam logchannel #ch` · `antispam status`",
     },
     "owner": {
-        "label": "Owner Only", "emoji": "👑", "owner_only": True,
+        "label": "Owner Only", "emoji": ICON_OWNER if ICON_OWNER else "👑", "owner_only": True,
         "value": (
             "`maintenance on/off/status`\n"
             "`noprefix grant/revoke/list`\n"
@@ -2095,22 +2104,76 @@ HELP_CATEGORIES = {
 def _visible_help_categories(is_owner_user: bool) -> dict:
     return {k: v for k, v in HELP_CATEGORIES.items() if is_owner_user or not v.get("owner_only")}
 
-def build_help_home_embed(is_owner_user: bool, has_np: bool) -> discord.Embed:
-    cats  = _visible_help_categories(is_owner_user)
+def _invite_url() -> Optional[str]:
+    """Bikin link invite bot secara otomatis (gak perlu env var tambahan)."""
+    if not bot.user:
+        return None
+    perms = discord.Permissions(
+        view_channel=True, send_messages=True, embed_links=True, attach_files=True,
+        read_message_history=True, add_reactions=True, use_external_emojis=True,
+        manage_messages=True, manage_channels=True, manage_roles=True, manage_events=True,
+        manage_guild=True, manage_emojis_and_stickers=True, kick_members=True, ban_members=True,
+        moderate_members=True, move_members=True, connect=True,
+    )
+    return discord.utils.oauth_url(bot.user.id, permissions=perms, scopes=("bot", "applications.commands"))
+
+def _count_commands(is_owner_user: bool, guild: Optional[discord.Guild], user: discord.abc.User) -> tuple:
+    """Total command unik (prefix + slash, alias gak dihitung dobel) & berapa yang bisa dipakai user ini."""
+    prefix_names = {c.name for c in bot.commands}
+    slash_names  = {c.name for c in bot.tree.get_commands()}
+    all_names    = prefix_names | slash_names
+    total = len(all_names)
+    if is_owner_user:
+        return total, total
+    hidden_owner   = len(OWNER_ONLY_CMDS & all_names)
+    has_prem       = user_has_premium(guild, user)
+    locked_premium = set(cfg.get("premium_commands", [])) & all_names
+    hidden_premium = 0 if has_prem else len(locked_premium - OWNER_ONLY_CMDS)
+    usable = max(total - hidden_owner - hidden_premium, 0)
+    return total, usable
+
+def build_help_home_embed(is_owner_user: bool, has_np: bool, user: discord.abc.User,
+                           guild: Optional[discord.Guild] = None) -> discord.Embed:
+    cats           = _visible_help_categories(is_owner_user)
+    total, usable  = _count_commands(is_owner_user, guild, user)
+    divider        = "─" * 32
+
+    lines = [
+        divider,
+        "",
+        f"Hey!! **{user.display_name}**, I am **{BOT_NAME}**",
+        "",
+        f"~ My default prefix is: **`{BOT_PREFIX.strip()}`**",
+        f"~ Total Commands : `{total}` | Usable By You `{usable}`",
+    ]
+    if has_np:
+        lines.append("~ Kamu punya akses **no-prefix**! ✨")
+    lines += [
+        divider,
+        "",
+        f"**Help Related to {BOT_NAME} Commands:**",
+    ]
+    for c in cats.values():
+        lines.append(f"{c['emoji']} : **{c['label']}**")
+    lines += ["", divider, ""]
+
+    invite_url = _invite_url()
+    link_bits = []
+    if invite_url:
+        link_bits.append(f"[Invite {BOT_NAME}]({invite_url})")
+    if SUPPORT_INVITE:
+        link_bits.append(f"[Support Server]({SUPPORT_INVITE})")
+    if link_bits:
+        lines.append("~ " + " | ".join(link_bits))
+
     embed = discord.Embed(
         title=f"{BOT_NAME} — Help Menu",
-        description=(
-            f"*{BOT_TAGLINE}*\n\n"
-            f"Prefix aku: **`!joy`** atau **`!j`**\n"
-            + ("✨ Kamu punya akses **no-prefix**!\n" if has_np else "")
-            + "\nPilih kategori di menu bawah buat lihat daftar command."
-        ),
+        description="\n".join(lines),
         color=COLOR_PRIMARY,
-        timestamp=discord.utils.utcnow()
     )
-    for c in cats.values():
-        embed.add_field(name=f"{c['emoji']} {c['label']}", value="\u200b", inline=True)
-    embed.set_footer(text=BOT_NAME + " v" + BOT_VERSION + " • " + BOT_TAGLINE)
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.set_footer(text=f"Thanks For Choosing {BOT_NAME}")
     return embed
 
 def build_help_category_embed(key: str) -> discord.Embed:
@@ -2148,18 +2211,24 @@ class HelpHomeButton(discord.ui.Button):
         if interaction.user.id != view.author_id:
             return await interaction.response.send_message(
                 embed=error_embed("Menu ini bukan buat kamu — ketik `!joy help` sendiri ya."), ephemeral=True)
-        embed = build_help_home_embed(view.is_owner_user, view.has_np)
+        embed = build_help_home_embed(view.is_owner_user, view.has_np, view.user, view.guild)
         await interaction.response.edit_message(embed=embed, view=view)
 
 class HelpView(discord.ui.View):
-    def __init__(self, author_id: int, is_owner_user: bool, has_np: bool, timeout: float = 120):
+    def __init__(self, user: discord.abc.User, guild: Optional[discord.Guild],
+                 is_owner_user: bool, has_np: bool, timeout: float = 120):
         super().__init__(timeout=timeout)
-        self.author_id     = author_id
-        self.is_owner_user = is_owner_user
-        self.has_np        = has_np
+        self.user           = user
+        self.author_id      = user.id
+        self.guild          = guild
+        self.is_owner_user  = is_owner_user
+        self.has_np         = has_np
         self.message: Optional[discord.Message] = None
         self.add_item(HelpSelect(is_owner_user))
         self.add_item(HelpHomeButton())
+        invite_url = _invite_url()
+        if invite_url:
+            self.add_item(discord.ui.Button(label=f"Invite {BOT_NAME}", style=discord.ButtonStyle.link, url=invite_url, row=1))
         if SUPPORT_INVITE:
             self.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_INVITE, row=1))
 
@@ -2182,8 +2251,8 @@ def _resolve_np_status(guild: Optional[discord.Guild], user: discord.abc.User, i
 async def pfx_help(ctx):
     is_owner_user = (ctx.author.id == bot.owner_id)
     has_np        = _resolve_np_status(ctx.guild, ctx.author, is_owner_user)
-    view          = HelpView(ctx.author.id, is_owner_user, has_np)
-    view.message  = await ctx.send(embed=build_help_home_embed(is_owner_user, has_np), view=view)
+    view          = HelpView(ctx.author, ctx.guild, is_owner_user, has_np)
+    view.message  = await ctx.send(embed=build_help_home_embed(is_owner_user, has_np, ctx.author, ctx.guild), view=view)
 
 # ══════════════════════════════════════════════════════════════════
 # SLASH COMMANDS
@@ -2254,10 +2323,9 @@ async def slash_ping(i: discord.Interaction):
 async def slash_help(i: discord.Interaction):
     is_owner_user = (i.user.id == bot.owner_id)
     has_np        = _resolve_np_status(i.guild, i.user, is_owner_user)
-    view          = HelpView(i.user.id, is_owner_user, has_np)
-    await i.response.send_message(embed=build_help_home_embed(is_owner_user, has_np), view=view, ephemeral=True)
+    view          = HelpView(i.user, i.guild, is_owner_user, has_np)
+    await i.response.send_message(embed=build_help_home_embed(is_owner_user, has_np, i.user, i.guild), view=view, ephemeral=True)
     view.message = await i.original_response()
-
 
 
 @bot.event
@@ -2283,8 +2351,10 @@ async def on_member_join(member: discord.Member):
     badge_lines = []
     for b in badges:
         info = BOT_ROLE_BADGES.get(b, BOT_ROLE_BADGES["user"])
-        badge_lines.append("\u2022 **" + info["label"] + "**")
-    embed.add_field(name="ALL BADGES", value="\n".join(badge_lines), inline=True)
+        prefix = (info["emoji"] + " ") if info.get("emoji") else "\u2022 "
+        badge_lines.append(prefix + "**" + info["label"] + "**")
+    badges_field_name = (ICON_BADGES + " ALL BADGES") if ICON_BADGES else "ALL BADGES"
+    embed.add_field(name=badges_field_name, value="\n".join(badge_lines), inline=True)
     embed.add_field(name="Bot Role", value=role.capitalize(), inline=True)
     embed.set_footer(text=BOT_NAME + " \u2022 " + BOT_TAGLINE)
     try:
