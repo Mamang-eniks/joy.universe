@@ -1,4 +1,4 @@
-🤖 JOY CANNOT — Discord Bot
+🤖 JOY UNIVERSE — Discord Bot
 ===========================
 
 > A professional, production-ready multi-purpose Discord bot built with `discord.py 2.x`.
@@ -12,16 +12,16 @@
 |---|---|
 | 🛡️ Moderation | `kick`, `ban`, `unban`, `timeout`, `untimeout`, `warn`, `warnings`, `unwarn`, `clearwarnings`, `purge`, `lock`, `unlock`, `slowmode` |
 | 🎭 Role & Voice | `addrole`, `removerole`, `move` |
-| ℹ️ Info | `userinfo`, `serverinfo`, `avatar`, `ping`, `addemoji`, `profile` |
+| ℹ️ Info | `userinfo`, `serverinfo`, `avatar`, `ping`, `addemoji` |
 | 🎫 Ticket System | Panel with custom title + description, per-ticket dedicated log channel (auto-created and archived on close), configurable support role & max tickets per user |
-| 📅 Scheduled Event | Creates a native Discord Scheduled Event and posts an announcement embed to a normal text channel — works via prefix (`event create`) or `/createvent` |
+| 📅 Scheduled Event | Creates a native Discord Scheduled Event and posts a polished announcement embed (title, description, divider, start/end timestamps) to a normal text channel, with an optional clickable link button (`--button <url> ["label"]` / slash param) — works via prefix (`event create`) or `/createvent` |
 | 🎉 Giveaway | `giveaway start/end/reroll/list` with optional required role & winner role |
 | 🚫 Antispam | Honeypot channel that auto-bans anyone who posts in it, cross-channel spam detection, dedicated mod-log channel |
 | 💎 Premium System | Owner can lock/unlock specific commands to Premium-only, grant premium with auto-expiry (`grantpremium @user 7d/30d/permanent`), premium users get no-prefix access automatically |
 | 🚨 Maintenance Mode | Owner-only switch that locks every command for everyone except the owner while the bot is under maintenance |
 | ✨ No-Prefix | Owner, whitelisted users/guilds, and Premium users can run commands without typing the prefix |
-| 🏅 Profile & Badges | Founder/Developer/Management/Staff/Premium/No-Prefix/User badges, command-usage counter, badge auto-granted on joining the support server |
-| 💬 Mention as Prefix | Tagging the bot (`@JOY CANNOT`) alone shows a quick help hint; tagging it followed by a command (`@JOY CANNOT ban @user`) runs that command directly |
+| 🏅 Badge System | Founder/Developer/Management/Staff/Premium/No-Prefix/User badges assigned internally (via `botrole`), badge auto-granted on joining the support server — no profile card, badges are used for role hierarchy only |
+| 💬 Mention as Prefix | Tagging the bot (`@JOY UNIVERSE`) alone shows a quick help hint; tagging it followed by a command (`@JOY UNIVERSE ban @user`) runs that command directly |
 | 🎛️ Interactive Help | `!joy help` / `/help` opens a category-based menu (dropdown + Home button); the Owner Only category is completely hidden from non-owners |
 
 ---
@@ -82,8 +82,9 @@ python bot.py
 ---------
 
 - **`!joy`** (main) or **`!j`** (short alias)
+- Every command has one or more short aliases (e.g. `kick`/`k`, `ban`/`b`, `ticket`/`tickets`, `giveaway`/`gw`, `event`/`ev`) — check `!joy help` for the full list per category.
 - Owner, Premium users, and anyone whitelisted with `noprefix` can run commands without typing the prefix at all.
-- Tagging the bot also works as a prefix: `@JOY CANNOT profile`.
+- Tagging the bot also works as a prefix: `@JOY UNIVERSE profile`.
 
 ---
 
