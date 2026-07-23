@@ -1,0 +1,2348 @@
+"""
+JOY UNIVERSE — Discord Moderation Bot
+Author  : Niks. (Founder)
+Version : 1.0.0
+
+"No mercy. No limits. Full control."
+
+Features:
+  - Full moderation suite (kick, ban, timeout, warn, purge, lock, slowmode, etc.)
+  - No-prefix command system (owner + premium users)
+  - Bot role hierarchy: Founder > Developer > Management > Staff
+  - XP leveling + rank card (image)
+  - Giveaway system with winner role auto-assign
+  - Ticket system
+  - Honeypot anti-spam channel (auto-ban)
+  - Premium system with expiry
+  - Multi-language support
+  - Owner supreme — overrides all permission checks
+"""
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+import json
+import os
+import re
+import shlex
+import asyncio
+import datetime
+import logging
+import pytz
+from collections import defaultdict
+from typing import Optional
+
+logging.basicConfig(level=logging.INFO)
+
+from emoji_config import (
+    BADGE_FOUNDER, BADGE_DEVELOPER, BADGE_MANAGEMENT, BADGE_STAFF,
+    BADGE_PREMIUM, BADGE_NOPREFIX, BADGE_USER,
+    ICON_TICKET_OPEN, ICON_TICKET_CLOSE, ICON_GIVEAWAY_REACT,
+)
+
+# ══════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ══════════════════════════════════════════════════════════════════
+
+BOT_NAME      = "JOY UNIVERSE"
+BOT_TAGLINE   = "No mercy. No limits. Full control."
+BOT_VERSION   = "1.0.0"
+BOT_PREFIX    = "!joy "
+CONFIG_PATH   = "data/config.json"
+WIB           = pytz.timezone("Asia/Jakarta")
+
+# Kuning & oren — palet JOY UNIVERSE
+COLOR_PRIMARY = 0xFF8C00   # Dark orange — warna utama embed
+COLOR_SUCCESS = 0x22C55E   # Hijau (tetap — konvensi UX universal buat "berhasil")
+COLOR_ERROR   = 0xEF4444   # Merah (tetap — konvensi UX universal buat "gagal")
+COLOR_WARNING = 0xF59E0B   # Amber — udah pas, gak perlu diganti
+COLOR_INFO    = 0xFFD60A   # Kuning cerah — accent info
+
+# Support server invite link — set via env var SUPPORT_INVITE
+SUPPORT_INVITE = os.getenv("SUPPORT_INVITE", "")
+
+SPAM_THRESHOLD = 3
+SPAM_WINDOW    = 8.0
+
+# ══════════════════════════════════════════════════════════════════
+# CONFIG
+# ══════════════════════════════════════════════════════════════════
+
+def load_config() -> dict:
+    os.makedirs("data", exist_ok=True)
+    if not os.path.exists(CONFIG_PATH):
+        default = {
+            "guilds":            {},
+            "premium_users":     [],
+            "premium_guilds":    [],
+            "premium_commands":  [],
+            "premium_expiry":    {},
+            "no_prefix_users":   [],
+            "no_prefix_guilds":  [],
+            "bot_roles":         {},
+            "votes":             {},
+            "maintenance": {"enabled": False, "reason": ""},
+            "payment_methods": {
+                "qris":    {"enabled": True, "image_url": "", "info": ""},
+                "bank":    {"enabled": True, "bank_name": "", "account_number": "", "account_name": ""},
+                "ewallet": {"enabled": True, "type": "", "number": ""},
+            }
+        }
+        save_config(default)
+        return default
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("guilds",           {})
+    data.setdefault("premium_users",    [])
+    data.setdefault("premium_guilds",   [])
+    data.setdefault("premium_commands", [])
+    data.setdefault("premium_expiry",   {})
+    data.setdefault("no_prefix_users",  [])
+    data.setdefault("no_prefix_guilds", [])
+    data.setdefault("bot_roles",        {})
+    data.setdefault("votes",            {})
+    data.setdefault("support_server_members", [])  # user IDs yang sudah join support server
+    data.setdefault("commands_run",           {})  # uid → jumlah command dijalankan
+    data.setdefault("maintenance", {"enabled": False, "reason": ""})
+    for gid, gc in data.get("guilds", {}).items():
+        _init_guild(gc)
+    save_config(data)
+    return data
+
+def _init_guild(gc: dict):
+    gc.setdefault("main_channel",      None)
+    gc.setdefault("announce_channel",  None)
+    gc.setdefault("spam_trap_channel", None)
+    gc.setdefault("mod_log_channel",   None)
+    gc.setdefault("warnings",          {})
+    gc.setdefault("active_tickets",    {})
+    gc.setdefault("ticket", {
+        "category":     None,
+        "log_category": None,
+        "support_role": None,
+        "max_tickets":  1,
+        "panels":       [],
+        "counter":      0,
+    })
+    gc["ticket"].setdefault("category",     None)
+    gc["ticket"].setdefault("log_category", None)
+    gc["ticket"].setdefault("support_role", None)
+    gc["ticket"].setdefault("max_tickets",  1)
+    gc["ticket"].setdefault("panels",       [])
+    gc["ticket"].setdefault("counter",      0)
+
+def save_config(cfg: dict):
+    os.makedirs("data", exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+def guild_cfg(cfg: dict, guild_id: int) -> dict:
+    gid = str(guild_id)
+    if gid not in cfg["guilds"]:
+        cfg["guilds"][gid] = {}
+        _init_guild(cfg["guilds"][gid])
+        save_config(cfg)
+    gc = cfg["guilds"][gid]
+    _init_guild(gc)
+    return gc
+
+# ══════════════════════════════════════════════════════════════════
+# STRING TABLE (Bahasa Indonesia — fixed, tidak ada sistem multi-language)
+# ══════════════════════════════════════════════════════════════════
+
+STRINGS = {
+    "no_perm":         "Kamu tidak memiliki izin untuk menggunakan perintah ini.",
+    "kick_success":    "{user} telah dikick. Alasan: {reason}",
+    "ban_success":     "{user} telah diban. Alasan: {reason}",
+    "timeout_success": "{user} telah di-timeout selama {duration} menit.",
+    "warn_success":    "{user} telah diperingatkan. Alasan: {reason}",
+    "role_add":        "Peran {role} ditambahkan ke {user}.",
+    "role_remove":     "Peran {role} dihapus dari {user}.",
+    "move_success":    "{user} dipindahkan ke {channel}.",
+    "emoji_add":       "Emoji {name} berhasil ditambahkan.",
+    "ticket_open":     "Tiket kamu telah dibuat: {channel}",
+}
+
+def t(cfg: dict, guild_id: int, key: str, **kwargs) -> str:
+    """Ambil template pesan bot. Parameter cfg/guild_id dipertahankan untuk
+    kompatibilitas pemanggilan lama, meski bot sekarang fixed Bahasa Indonesia."""
+    return STRINGS.get(key, key).format(**kwargs)
+
+# ══════════════════════════════════════════════════════════════════
+# EMBED HELPERS
+# ══════════════════════════════════════════════════════════════════
+
+def _footer(embed: discord.Embed):
+    embed.set_footer(text=f"{BOT_NAME} • {BOT_TAGLINE}")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+def base_embed(title: str, description: str = "", color: int = COLOR_PRIMARY) -> discord.Embed:
+    return _footer(discord.Embed(title=title, description=description, color=color))
+
+def success_embed(desc: str) -> discord.Embed:
+    return base_embed("Success", desc, COLOR_SUCCESS)
+
+def error_embed(desc: str) -> discord.Embed:
+    return base_embed("Error", desc, COLOR_ERROR)
+
+def info_embed(title: str, desc: str) -> discord.Embed:
+    return base_embed(title, desc, COLOR_INFO)
+
+# ══════════════════════════════════════════════════════════════════
+# BOT SETUP
+# ══════════════════════════════════════════════════════════════════
+
+intents                 = discord.Intents.default()
+intents.message_content = True
+intents.members         = True
+intents.guilds          = True
+
+cfg = load_config()
+
+ORIGINAL_CMD_DESCRIPTIONS: dict[str, str] = {}
+
+class VallentTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        data = getattr(interaction, "data", None)
+        if not data:
+            return True
+        if interaction.type not in (
+            discord.InteractionType.application_command,
+            discord.InteractionType.autocomplete,
+        ):
+            return True
+        if data.get("type", 1) != 1:
+            return True
+        parts   = [data.get("name", "")]
+        options = data.get("options", [])
+        while options:
+            opt = options[0]
+            if opt.get("type") in (1, 2):
+                parts.append(opt["name"])
+                options = opt.get("options", [])
+            else:
+                break
+        cmd_name      = " ".join(parts)
+        is_owner_user = interaction.user.id == bot.owner_id
+
+        # Maintenance mode — hanya owner yang boleh lewat
+        if is_maintenance() and not is_owner_user:
+            try:
+                await interaction.response.send_message(embed=maintenance_embed(), ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            return False
+
+        if cmd_name in cfg.get("premium_commands", []) and not is_owner_user and not user_has_premium(interaction.guild, interaction.user):
+            try:
+                await interaction.response.send_message(
+                    embed=base_embed(
+                        "Premium Required",
+                        f"Command `/{cmd_name}` hanya untuk **Premium** users.\n"
+                        "Hubungi owner atau kunjungi server support untuk berlangganan.",
+                        color=COLOR_WARNING
+                    ), ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+            return False
+
+        track_command_use(interaction.user.id)
+        return True
+
+bot = commands.Bot(
+    command_prefix=BOT_PREFIX,
+    intents=intents,
+    help_command=None,
+    owner_id=int(os.getenv("OWNER_ID", "0")),
+    tree_cls=VallentTree,
+)
+
+# ══════════════════════════════════════════════════════════════════
+# PREMIUM HELPERS
+# ══════════════════════════════════════════════════════════════════
+
+def user_has_premium(guild: Optional[discord.Guild], user: discord.abc.User) -> bool:
+    uid        = str(user.id)
+    expiry_map = cfg.get("premium_expiry", {})
+    if user.id in cfg.get("premium_users", []):
+        expiry_str = expiry_map.get(uid)
+        if expiry_str:
+            try:
+                exp = datetime.datetime.fromisoformat(expiry_str)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=datetime.timezone.utc)
+                if datetime.datetime.now(datetime.timezone.utc) > exp:
+                    cfg["premium_users"] = [u for u in cfg["premium_users"] if u != user.id]
+                    cfg["premium_expiry"].pop(uid, None)
+                    save_config(cfg)
+                    return False
+            except Exception:
+                pass
+        return True
+    if guild and guild.id in cfg.get("premium_guilds", []):
+        return True
+    return False
+
+async def check_premium_expiry():
+    now        = datetime.datetime.now(datetime.timezone.utc)
+    expiry_map = cfg.get("premium_expiry", {})
+    revoked    = []
+    for uid_str, expiry_str in list(expiry_map.items()):
+        try:
+            exp = datetime.datetime.fromisoformat(expiry_str)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=datetime.timezone.utc)
+            if now > exp:
+                uid = int(uid_str)
+                cfg["premium_users"] = [u for u in cfg.get("premium_users", []) if u != uid]
+                expiry_map.pop(uid_str, None)
+                revoked.append(uid)
+        except Exception:
+            pass
+    if revoked:
+        save_config(cfg)
+        logging.info(f"[Premium] Expired and revoked: {revoked}")
+
+# ══════════════════════════════════════════════════════════════════
+# BOT ROLES SYSTEM
+# ══════════════════════════════════════════════════════════════════
+
+BOT_ROLE_HIERARCHY = ["staff", "management", "developer", "founder"]
+
+BOT_ROLE_BADGES = {
+    # Emoji diambil dari emoji_config.py — edit file itu untuk isi ID emoji
+    "founder":    {"label": "FOUNDER",    "color": 0xFF8C00, "emoji": BADGE_FOUNDER},
+    "developer":  {"label": "DEVELOPER",  "color": 0xFF9F1C, "emoji": BADGE_DEVELOPER},
+    "management": {"label": "MANAGEMENT", "color": 0xFFB347, "emoji": BADGE_MANAGEMENT},
+    "staff":      {"label": "STAFF",      "color": 0xFFC96B, "emoji": BADGE_STAFF},
+    "premium":    {"label": "PREMIUM",    "color": 0xFFD60A, "emoji": BADGE_PREMIUM},
+    "noprefix":   {"label": "NO PREFIX",  "color": 0x22C55E, "emoji": BADGE_NOPREFIX},
+    "user":       {"label": "USER",       "color": 0x6B7280, "emoji": BADGE_USER},
+}
+
+def get_bot_role(uid: int) -> str:
+    if uid == bot.owner_id:
+        return "founder"
+    return cfg.get("bot_roles", {}).get(str(uid), "user")
+
+def get_user_badges(uid: int) -> list:
+    """
+    Kumpulkan semua badge user.
+    Hierarki: founder > developer > management > staff > noprefix > premium > user
+    Badge USER hanya didapat kalau user join server support bot.
+    Kalau tidak punya badge apapun → list kosong.
+    """
+    badges = []
+    role   = get_bot_role(uid)
+    if role != "user":
+        badges.append(role)
+    if uid in cfg.get("no_prefix_users", []):
+        badges.append("noprefix")
+    if uid in cfg.get("premium_users", []):
+        badges.append("premium")
+    if uid in cfg.get("support_server_members", []):
+        badges.append("user")
+    # Tidak ada default badge — kalau kosong ya kosong
+    return badges
+
+# ══════════════════════════════════════════════════════════════════
+# ANTI SPAM — Cross-channel fingerprint tracker
+# ══════════════════════════════════════════════════════════════════
+
+spam_tracker:       dict[int, dict[str, dict]] = defaultdict(dict)
+spam_cleanup_times: dict[int, float]           = {}
+
+def _spam_fingerprint(message: discord.Message) -> str:
+    parts: list[str] = []
+    text = message.content.strip().lower()
+    if text:
+        parts.append(text)
+    for att in message.attachments:
+        parts.append(f"att:{att.filename.lower()}")
+    url_pat = re.compile(r"(https?://[^\s]+|discord\.gg/[^\s]+)", re.IGNORECASE)
+    for url in url_pat.findall(message.content):
+        parts.append(f"url:{url.lower().split('?')[0].rstrip('/')}")
+    for emb in message.embeds:
+        if emb.url:
+            parts.append(f"url:{emb.url.lower().split('?')[0].rstrip('/')}")
+    return "|".join(sorted(set(parts))) or "empty"
+
+# ══════════════════════════════════════════════════════════════════
+# OWNER / PERMISSION HELPERS
+# ══════════════════════════════════════════════════════════════════
+
+OWNER_ONLY_CMDS = {"maintenance", "noprefix", "botrole", "grantpremium", "premiumlock", "blacklist", "vxleave", "syncsupport"}
+
+def is_owner():
+    async def predicate(ctx: commands.Context) -> bool:
+        return ctx.author.id == bot.owner_id
+    return commands.check(predicate)
+
+def is_staff_or_above(uid: int) -> bool:
+    role = get_bot_role(uid)
+    return role in BOT_ROLE_HIERARCHY
+
+# ══════════════════════════════════════════════════════════════════
+# MAINTENANCE MODE
+# ══════════════════════════════════════════════════════════════════
+
+def is_maintenance() -> bool:
+    return bool(cfg.get("maintenance", {}).get("enabled", False))
+
+def maintenance_reason() -> str:
+    return cfg.get("maintenance", {}).get("reason") or "Bot sedang dalam perbaikan. Coba lagi nanti."
+
+def maintenance_embed() -> discord.Embed:
+    return base_embed(
+        "Under Maintenance",
+        f"{BOT_NAME} sedang maintenance, semua command dikunci sementara.\n**Alasan:** {maintenance_reason()}",
+        color=COLOR_WARNING
+    )
+
+# ══════════════════════════════════════════════════════════════════
+# COMMAND USAGE TRACKER (Commands Runned)
+# ══════════════════════════════════════════════════════════════════
+
+def track_command_use(uid: int) -> None:
+    """Catat setiap command yang berhasil dijalankan oleh seorang user."""
+    cmds_run  = cfg.setdefault("commands_run", {})
+    key       = str(uid)
+    cmds_run[key] = cmds_run.get(key, 0) + 1
+    save_config(cfg)
+
+@bot.check
+async def global_prefix_premium_check(ctx: commands.Context) -> bool:
+    cmd = ctx.command.qualified_name if ctx.command else None
+    if not cmd:
+        return True
+    is_owner_user = (ctx.author.id == bot.owner_id)
+
+    # Maintenance mode — hanya owner yang boleh lewat
+    if is_maintenance() and cmd not in OWNER_ONLY_CMDS and not is_owner_user:
+        await ctx.send(embed=maintenance_embed())
+        return False
+
+    if cmd in OWNER_ONLY_CMDS:
+        return True
+    if cmd not in cfg.get("premium_commands", []):
+        return True
+    if is_owner_user:
+        return True
+    if user_has_premium(ctx.guild, ctx.author):
+        return True
+    await ctx.send(embed=base_embed(
+        "Premium Required",
+        f"Command `{cmd}` hanya untuk **Premium** users.\n"
+        "Hubungi owner untuk berlangganan.",
+        color=COLOR_WARNING
+    ))
+    return False
+
+@bot.event
+async def on_command_completion(ctx: commands.Context):
+    """Dipanggil setiap command prefix berhasil dijalankan tanpa error."""
+    track_command_use(ctx.author.id)
+
+# ══════════════════════════════════════════════════════════════════
+# MODERATION HELPERS
+# ══════════════════════════════════════════════════════════════════
+
+def _is_protected(guild: discord.Guild, member: discord.Member) -> bool:
+    """Cek apakah member tidak bisa dimoderasi (owner guild atau role lebih tinggi dari bot)."""
+    if member.id == guild.owner_id:
+        return True
+    if guild.me and member.top_role >= guild.me.top_role:
+        return True
+    return False
+
+async def do_kick(guild, author, member, reason, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.kick_members:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    if _is_protected(guild, member):
+        return await reply_fn(embed=error_embed("Tidak bisa kick user ini."))
+    try:
+        await member.kick(reason=f"{author} | {reason}")
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "kick_success", user=member.mention, reason=reason)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk kick."))
+
+async def do_ban(guild, author, member, reason, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.ban_members:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    if _is_protected(guild, member):
+        return await reply_fn(embed=error_embed("Tidak bisa ban user ini."))
+    try:
+        await guild.ban(member, reason=f"{author} | {reason}", delete_message_days=0)
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "ban_success", user=member.mention, reason=reason)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk ban."))
+
+async def do_timeout(guild, author, member, minutes, reason, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.moderate_members:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    if _is_protected(guild, member):
+        return await reply_fn(embed=error_embed("Tidak bisa timeout user ini."))
+    try:
+        until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+        await member.timeout(until, reason=f"{author} | {reason}")
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "timeout_success", user=member.mention, duration=minutes)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk timeout."))
+
+async def do_warn(guild, author, member, reason, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.manage_messages:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    gc = guild_cfg(cfg, guild.id)
+    gc.setdefault("warnings", {}).setdefault(str(member.id), []).append({
+        "reason": reason, "warned_by": author.id,
+        "timestamp": discord.utils.utcnow().isoformat()
+    })
+    save_config(cfg)
+    try:
+        dm = base_embed(f"You were warned in {guild.name}", f"Reason: {reason}", color=COLOR_WARNING)
+        await member.send(embed=dm)
+    except Exception:
+        pass
+    await reply_fn(embed=success_embed(t(cfg, guild.id, "warn_success", user=member.mention, reason=reason)))
+
+async def do_addrole(guild, author, member, role, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.manage_roles:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    try:
+        await member.add_roles(role, reason=f"By {author}")
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "role_add", role=role.name, user=member.mention)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk manage roles."))
+
+async def do_removerole(guild, author, member, role, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.manage_roles:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    try:
+        await member.remove_roles(role, reason=f"By {author}")
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "role_remove", role=role.name, user=member.mention)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk manage roles."))
+
+async def do_move(guild, author, member, channel, reply_fn):
+    if author.id != bot.owner_id and not author.guild_permissions.move_members:
+        return await reply_fn(embed=error_embed(t(cfg, guild.id, "no_perm")))
+    try:
+        await member.move_to(channel, reason=f"By {author}")
+        await reply_fn(embed=success_embed(t(cfg, guild.id, "move_success", user=member.mention, channel=channel.name)))
+    except discord.Forbidden:
+        await reply_fn(embed=error_embed("Bot tidak punya izin untuk move member."))
+
+async def do_userinfo(guild, member, reply_fn):
+    roles = [r.mention for r in reversed(member.roles) if r.name != "@everyone"][:10]
+    embed = discord.Embed(title=f"{member.display_name}", color=member.color or COLOR_PRIMARY, timestamp=discord.utils.utcnow())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Username",  value=str(member),                                              inline=True)
+    embed.add_field(name="ID",        value=f"`{member.id}`",                                         inline=True)
+    embed.add_field(name="Bot",       value="Yes" if member.bot else "No",                             inline=True)
+    embed.add_field(name="Joined",    value=discord.utils.format_dt(member.joined_at, "R") if member.joined_at else "?", inline=True)
+    embed.add_field(name="Created",   value=discord.utils.format_dt(member.created_at, "R"),           inline=True)
+    embed.add_field(name="Roles",     value=" ".join(roles) if roles else "None",                      inline=False)
+    embed.set_footer(text=f"{BOT_NAME} • {guild.name}")
+    await reply_fn(embed=embed)
+
+async def do_avatar(member, reply_fn):
+    embed = discord.Embed(title=f"{member.display_name}'s Avatar", color=COLOR_PRIMARY)
+    embed.set_image(url=member.display_avatar.url)
+    embed.set_footer(text=BOT_NAME)
+    await reply_fn(embed=embed)
+
+async def do_ping(reply_fn):
+    lat = round(bot.latency * 1000)
+    embed = base_embed("Pong!", f"Latency: **{lat}ms**", COLOR_SUCCESS if lat < 100 else COLOR_WARNING)
+    await reply_fn(embed=embed)
+
+async def do_addemoji(guild, emoji_or_url: str, name: str):
+    import aiohttp, io
+    try:
+        if emoji_or_url.startswith("<") and ":" in emoji_or_url:
+            parts  = emoji_or_url.strip("<>").split(":")
+            eid    = parts[-1]
+            ext    = "gif" if emoji_or_url.startswith("<a:") else "png"
+            url    = f"https://cdn.discordapp.com/emojis/{eid}.{ext}"
+            name   = name or parts[-2]
+        else:
+            url = emoji_or_url
+        if not name:
+            return {"success": False, "error": "Nama emoji diperlukan."}
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url) as r:
+                if r.status != 200:
+                    return {"success": False, "error": f"Gagal fetch image: HTTP {r.status}"}
+                data = await r.read()
+        emoji = await guild.create_custom_emoji(name=name, image=data)
+        return {"success": True, "emoji": emoji}
+    except discord.Forbidden:
+        return {"success": False, "error": "Bot tidak punya izin manage emojis."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# ══════════════════════════════════════════════════════════════════
+# TICKET HANDLER
+# ══════════════════════════════════════════════════════════════════
+
+class TicketCloseButton(discord.ui.Button):
+    """Tombol close ticket persisten — dipasang ulang tiap start via bot.add_view di on_ready."""
+    def __init__(self):
+        super().__init__(
+            label="Close Ticket", style=discord.ButtonStyle.danger,
+            emoji=ICON_TICKET_CLOSE if ICON_TICKET_CLOSE else "🔒",
+            custom_id="vx_ticket_close"
+        )
+
+    async def callback(self, i: discord.Interaction):
+        gc  = guild_cfg(cfg, i.guild.id)
+        rec = gc["active_tickets"].get(str(i.channel.id))
+        if not rec:
+            return await i.response.send_message(embed=error_embed("Ticket ini sudah tidak aktif."), ephemeral=True)
+        if not (i.user.guild_permissions.manage_channels or rec.get("owner") == i.user.id):
+            return await i.response.send_message(embed=error_embed("Kamu tidak bisa menutup ticket ini."), ephemeral=True)
+        await i.response.send_message(embed=info_embed("Ticket", "Menutup ticket..."), ephemeral=True)
+        await close_ticket(i.guild, i.channel, i.user, "Closed via button.")
+
+class TicketPersistentView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketCloseButton())
+
+class TicketOpenButton(discord.ui.Button):
+    """Tombol buka ticket di panel — persisten, tetap jalan walau bot restart."""
+    def __init__(self, label: str = "Open Ticket"):
+        super().__init__(
+            label=label, style=discord.ButtonStyle.danger,
+            emoji=ICON_TICKET_OPEN if ICON_TICKET_OPEN else "🎫",
+            custom_id="vx_ticket_open"
+        )
+
+    async def callback(self, i: discord.Interaction):
+        await handle_open_ticket(i)
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketOpenButton())
+
+async def close_ticket(guild: discord.Guild, channel: discord.TextChannel, closer: discord.abc.User, reason: str):
+    """
+    Menutup satu ticket: umumkan di channel, kirim ringkasan ke log channel
+    milik ticket tsb (log channel TETAP ADA sebagai arsip), lalu hapus channel ticket-nya.
+    Dipakai bersama oleh tombol Close dan command `ticket close`.
+    """
+    gc  = guild_cfg(cfg, guild.id)
+    rec = gc["active_tickets"].pop(str(channel.id), None)
+    save_config(cfg)
+
+    try:
+        await channel.send(embed=base_embed(
+            "Ticket Closing",
+            f"Ditutup oleh {closer.mention}.\n{reason}\n\nChannel akan dihapus dalam 5 detik.",
+            color=COLOR_ERROR
+        ))
+    except Exception:
+        pass
+
+    if rec and rec.get("log_channel"):
+        log_ch = guild.get_channel(rec["log_channel"])
+        if log_ch:
+            summary = base_embed("Ticket Closed", None, color=COLOR_ERROR)
+            summary.add_field(name="Ticket",    value=f"#{rec.get('number', '?'):04d}" if isinstance(rec.get("number"), int) else "-", inline=True)
+            summary.add_field(name="Owner",     value=f"<@{rec.get('owner')}>", inline=True)
+            summary.add_field(name="Closed By", value=closer.mention, inline=True)
+            summary.add_field(name="Reason",    value=reason or "-", inline=False)
+            try:
+                await log_ch.send(embed=summary)
+                await log_ch.edit(name=("closed-" + log_ch.name)[:100], reason="Ticket closed — archived")
+            except Exception:
+                pass
+
+    await asyncio.sleep(5)
+    try:
+        await channel.delete(reason=f"Ticket closed by {closer}")
+    except Exception:
+        pass
+
+async def handle_open_ticket(interaction: discord.Interaction):
+    gc     = guild_cfg(cfg, interaction.guild.id)
+    cat_id = gc["ticket"].get("category")
+    log_cat_id = gc["ticket"].get("log_category")
+    max_t  = gc["ticket"].get("max_tickets", 1)
+    uid    = interaction.user.id
+
+    if not cat_id:
+        return await interaction.response.send_message(
+            embed=error_embed("Ticket system belum dikonfigurasi. Jalankan `ticket setup` dulu."), ephemeral=True)
+
+    user_tickets = [t for t in gc["active_tickets"].values() if t.get("owner") == uid]
+    if len(user_tickets) >= max_t:
+        return await interaction.response.send_message(
+            embed=error_embed(f"Kamu sudah memiliki {len(user_tickets)}/{max_t} ticket terbuka."), ephemeral=True)
+
+    category = interaction.guild.get_channel(cat_id)
+    if not category:
+        return await interaction.response.send_message(
+            embed=error_embed("Ticket category tidak ditemukan."), ephemeral=True)
+
+    gc["ticket"]["counter"] = gc["ticket"].get("counter", 0) + 1
+    number = gc["ticket"]["counter"]
+
+    role_id = gc["ticket"].get("support_role")
+    role    = interaction.guild.get_role(role_id) if role_id else None
+
+    overwrites = {
+        interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user:               discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        interaction.guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    if role:
+        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+    ch = await category.create_text_channel(
+        name=f"ticket-{number:04d}-{interaction.user.name}",
+        overwrites=overwrites,
+        topic=f"Ticket #{number} for {interaction.user} ({interaction.user.id})"
+    )
+
+    # ── Log channel khusus untuk ticket ini ─────────────────────────────
+    log_ch = None
+    log_category = interaction.guild.get_channel(log_cat_id) if log_cat_id else None
+    if log_category:
+        log_overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        if role:
+            log_overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+        try:
+            log_ch = await log_category.create_text_channel(
+                name=f"log-{number:04d}-{interaction.user.name}",
+                overwrites=log_overwrites,
+                topic=f"Log arsip untuk ticket #{number} ({interaction.user.id})"
+            )
+        except Exception:
+            log_ch = None
+
+    gc["active_tickets"][str(ch.id)] = {
+        "owner":       uid,
+        "log_channel": log_ch.id if log_ch else None,
+        "number":      number,
+    }
+    save_config(cfg)
+
+    welcome_embed = base_embed(
+        f"Ticket #{number:04d} — {interaction.user.display_name}",
+        f"Halo {interaction.user.mention}, tim support akan segera membantu.\nJelaskan keperluanmu di sini.",
+        color=COLOR_PRIMARY
+    )
+    await ch.send(embed=welcome_embed, view=TicketPersistentView())
+
+    if log_ch:
+        open_emb = base_embed("Ticket Opened", None, color=COLOR_PRIMARY)
+        open_emb.add_field(name="Ticket",  value=f"#{number:04d}", inline=True)
+        open_emb.add_field(name="User",    value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+        open_emb.add_field(name="Channel", value=ch.mention, inline=True)
+        try:
+            await log_ch.send(embed=open_emb)
+        except Exception:
+            pass
+
+    await interaction.response.send_message(
+        embed=success_embed(t(cfg, interaction.guild.id, "ticket_open", channel=ch.mention)),
+        ephemeral=True
+    )
+
+# ══════════════════════════════════════════════════════════════════
+# GIVEAWAY SYSTEM
+# ══════════════════════════════════════════════════════════════════
+
+import random
+active_giveaways: dict[int, dict] = {}
+
+def build_giveaway_embed(gw: dict) -> discord.Embed:
+    ends_dt = datetime.datetime.utcfromtimestamp(gw["ends_ts"]).replace(tzinfo=datetime.timezone.utc)
+    embed   = discord.Embed(
+        title=f"GIVEAWAY — {gw['prize']}",
+        description=(
+            (gw.get("description", "") + "\n\n" if gw.get("description") else "") +
+            f"React dengan 🎉 untuk ikut!\n\n"
+            f"**Winners:** {gw['winner_count']}\n"
+            f"**Ends:** {discord.utils.format_dt(ends_dt, 'R')}\n"
+            f"**Hosted by:** <@{gw['host_id']}>"
+        ),
+        color=COLOR_ERROR,
+        timestamp=ends_dt
+    )
+    if gw.get("required_role"):
+        embed.add_field(name="Required Role", value=f"<@&{gw['required_role']}>", inline=True)
+    if gw.get("winner_role_id"):
+        embed.add_field(name="Winner Role", value=f"<@&{gw['winner_role_id']}>", inline=True)
+    embed.set_footer(text=f"{BOT_NAME} Giveaway • React 🎉 to enter")
+    return embed
+
+async def end_giveaway(gw: dict):
+    if gw.get("ended"):
+        return
+    gw["ended"] = True
+    active_giveaways.pop(gw["message_id"], None)
+    channel = bot.get_channel(gw["channel_id"])
+    if not channel:
+        return
+    try:
+        msg = await channel.fetch_message(gw["message_id"])
+    except Exception:
+        return
+    entries = list(set(gw.get("entries", [])))
+    if not entries:
+        ended_embed = build_giveaway_embed(gw)
+        ended_embed.description = "**Giveaway Ended**\n\nTidak ada peserta."
+        ended_embed.color = 0x4B5563
+        try:
+            await msg.edit(embed=ended_embed)
+        except Exception:
+            pass
+        await channel.send(embed=info_embed("Giveaway Ended", f"Tidak ada pemenang untuk **{gw['prize']}**."))
+        return
+    count   = min(gw["winner_count"], len(entries))
+    winners = random.sample(entries, count)
+    gw["winners"] = winners
+    ended_embed = build_giveaway_embed(gw)
+    winner_str  = " ".join(f"<@{w}>" for w in winners)
+    ended_embed.description = f"**Giveaway Ended!**\n\n**Winners:** {winner_str}"
+    ended_embed.color = 0x4B5563
+    try:
+        await msg.edit(embed=ended_embed)
+    except Exception:
+        pass
+    role_note = ""
+    win_role_id = gw.get("winner_role_id")
+    if win_role_id:
+        win_role = channel.guild.get_role(win_role_id)
+        if win_role:
+            assigned = 0
+            for wid in winners:
+                m = channel.guild.get_member(wid)
+                if m:
+                    try:
+                        await m.add_roles(win_role, reason=f"Giveaway winner: {gw['prize']}")
+                        assigned += 1
+                    except Exception:
+                        pass
+            if assigned:
+                role_note = f"\nRole {win_role.mention} diberikan ke {assigned} pemenang."
+    win_embed = discord.Embed(
+        title="Giveaway Winners!",
+        description=f"Selamat {winner_str}!\n\n**Prize:** {gw['prize']}{role_note}",
+        color=COLOR_SUCCESS,
+        timestamp=discord.utils.utcnow()
+    )
+    win_embed.set_footer(text=f"{BOT_NAME} Giveaway")
+    await channel.send(content=winner_str, embed=win_embed)
+
+# ══════════════════════════════════════════════════════════════════
+# TASKS
+# ══════════════════════════════════════════════════════════════════
+
+@tasks.loop(minutes=10)
+async def premium_expiry_task():
+    await check_premium_expiry()
+
+@tasks.loop(minutes=30)
+async def cleanup_spam_cache():
+    now     = discord.utils.utcnow().timestamp()
+    to_del  = [uid for uid, t in spam_cleanup_times.items() if now - t > 120]
+    for uid in to_del:
+        spam_tracker.pop(uid, None)
+        spam_cleanup_times.pop(uid, None)
+
+@tasks.loop(minutes=5)
+async def rotate_status():
+    statuses = [
+        discord.Activity(type=discord.ActivityType.watching, name="every move."),
+        discord.Activity(type=discord.ActivityType.listening, name="!joy help"),
+        discord.Activity(type=discord.ActivityType.playing, name="JOY UNIVERSE v1.0"),
+        discord.Activity(type=discord.ActivityType.watching, name=f"{len(bot.guilds)} servers"),
+    ]
+    import random as _r
+    await bot.change_presence(activity=_r.choice(statuses), status=discord.Status.dnd)
+
+# ══════════════════════════════════════════════════════════════════
+# BOT EVENTS
+# ══════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_ready():
+    print(f"[{BOT_NAME}] Ready as {bot.user} (ID: {bot.user.id})")
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketPersistentView())
+    for cmd in bot.tree.get_commands():
+        ORIGINAL_CMD_DESCRIPTIONS[cmd.name] = cmd.description.removeprefix("[💎] ")
+        if hasattr(cmd, "commands"):
+            for sub in cmd.commands:
+                ORIGINAL_CMD_DESCRIPTIONS[f"{cmd.name} {sub.name}"] = sub.description.removeprefix("[💎] ")
+    try:
+        synced = await bot.tree.sync()
+        print(f"[{BOT_NAME}] Synced {len(synced)} slash commands.")
+    except Exception as e:
+        print(f"[{BOT_NAME}] Sync error: {e}")
+    cleanup_spam_cache.start()
+    rotate_status.start()
+    if not premium_expiry_task.is_running():
+        premium_expiry_task.start()
+    print(f"[{BOT_NAME}] Online — {len(bot.guilds)} guild(s).")
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    guild_cfg(cfg, guild.id)
+    logging.info(f"[{BOT_NAME}] Joined: {guild.name} ({guild.id})")
+    bl = cfg.get("blacklisted_guilds", [])
+    if guild.id in bl:
+        try:
+            await guild.leave()
+            logging.info(f"[{BOT_NAME}] Left blacklisted guild: {guild.name}")
+        except Exception:
+            pass
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if not message.guild:
+        return
+
+    # ── Bot di-mention (dengan atau tanpa command) ──────────────────────────
+    mention_forms = (f"<@{bot.user.id}>", f"<@!{bot.user.id}>")
+    stripped = message.content.strip()
+    if bot.user in message.mentions and stripped.startswith(mention_forms):
+        used_form = next(mp for mp in mention_forms if stripped.startswith(mp))
+        rest = stripped[len(used_form):].strip()
+        if not rest:
+            # Cuma di-tag doang tanpa command → kasih tau prefix
+            is_owner_user = (message.author.id == bot.owner_id)
+            mention_embed = base_embed(
+                f"Halo {message.author.display_name}!",
+                f"Prefix aku: **`!joy`** atau **`!j`**\n"
+                f"Ketik `!joy help` buat lihat semua command."
+                + ("\n\n\u2728 Kamu punya akses **no-prefix**!" if is_owner_user or user_has_premium(message.guild, message.author) else ""),
+                color=COLOR_PRIMARY
+            )
+            try:
+                await message.reply(embed=mention_embed, mention_author=False)
+            except Exception:
+                pass
+            return
+        # Di-tag + command → perlakukan mention itu sebagai prefix
+        message.content = "!joy " + rest
+
+    # ── Honeypot channel check ────────────────────────────────────────────
+    gc_trap  = guild_cfg(cfg, message.guild.id)
+    trap_ch  = gc_trap.get("spam_trap_channel")
+    if trap_ch and message.channel.id == trap_ch:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await message.guild.ban(
+                message.author,
+                reason=f"[{BOT_NAME}] Sent message in honeypot channel.",
+                delete_message_days=1
+            )
+        except discord.Forbidden:
+            pass
+        log_id = gc_trap.get("mod_log_channel")
+        if log_id:
+            log_ch = message.guild.get_channel(log_id)
+            if log_ch:
+                emb = base_embed("Honeypot — Auto Banned", None, color=COLOR_ERROR)
+                emb.add_field(name="User",    value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+                emb.add_field(name="Channel", value=f"<#{trap_ch}>", inline=True)
+                snippet = (message.content or "")[:200]
+                if snippet:
+                    emb.add_field(name="Content", value=f"```{snippet}```", inline=False)
+                try:
+                    await log_ch.send(embed=emb)
+                except Exception:
+                    pass
+        return
+
+    # ── Ticket message mirroring ke log channel masing-masing ──────────────
+    ticket_rec = gc_trap.get("active_tickets", {}).get(str(message.channel.id))
+    if ticket_rec and ticket_rec.get("log_channel"):
+        log_ch = message.guild.get_channel(ticket_rec["log_channel"])
+        if log_ch and (message.content or message.attachments):
+            mirror = discord.Embed(
+                description=(message.content or "*[lampiran saja]*")[:4000],
+                color=COLOR_PRIMARY,
+                timestamp=message.created_at
+            )
+            mirror.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
+            if message.attachments:
+                mirror.add_field(
+                    name="Attachments",
+                    value="\n".join(a.url for a in message.attachments)[:1024],
+                    inline=False
+                )
+            try:
+                await log_ch.send(embed=mirror)
+            except Exception:
+                pass
+
+    # ── Anti cross-channel spam ────────────────────────────────────────────
+    uid         = message.author.id
+    fingerprint = _spam_fingerprint(message)
+    if fingerprint == "empty":
+        await bot.process_commands(message)
+        return
+    now_ts = discord.utils.utcnow().timestamp()
+    spam_cleanup_times[uid] = now_ts
+    tracker = spam_tracker[uid]
+    if fingerprint not in tracker:
+        tracker[fingerprint] = {"channels": set(), "messages": [], "first_seen": now_ts}
+    entry = tracker[fingerprint]
+    if now_ts - entry["first_seen"] > SPAM_WINDOW:
+        tracker[fingerprint] = {"channels": {message.channel.id}, "messages": [(message.channel.id, message.id)], "first_seen": now_ts}
+        entry = tracker[fingerprint]
+    else:
+        entry["channels"].add(message.channel.id)
+        entry["messages"].append((message.channel.id, message.id))
+    if len(entry["channels"]) >= SPAM_THRESHOLD:
+        del tracker[fingerprint]
+        for ch_id, msg_id in entry["messages"]:
+            try:
+                ch  = message.guild.get_channel(ch_id)
+                msg = await ch.fetch_message(msg_id) if ch else None
+                if msg:
+                    await msg.delete()
+            except Exception:
+                pass
+        try:
+            await message.guild.ban(
+                message.author,
+                reason=f"[{BOT_NAME}] Cross-channel spam detected.",
+                delete_message_days=1
+            )
+        except discord.Forbidden:
+            pass
+        return
+
+    # ── Prefix routing + no-prefix ────────────────────────────────────────
+    low = message.content.lower().strip()
+    if low.startswith("!joy ") or low == "!joy":
+        message.content = "!joy " + message.content[len("!joy"):].lstrip()
+    elif low.startswith("!j ") or low == "!j":
+        message.content = "!joy " + message.content[len("!j"):].lstrip()
+    elif not message.content.startswith("!joy "):
+        uid_int   = message.author.id
+        gid_int   = message.guild.id
+        np_users  = cfg.get("no_prefix_users",  [])
+        np_guilds = cfg.get("no_prefix_guilds", [])
+        has_np    = (
+            uid_int == bot.owner_id
+            or uid_int in np_users
+            or gid_int in np_guilds
+            or user_has_premium(message.guild, message.author)
+        )
+        if has_np:
+            text  = message.content.strip()
+            first = text.split()[0].lower() if text.split() else ""
+            known = {c.name for c in bot.commands} | {a for c in bot.commands for a in c.aliases}
+            if first in known:
+                message.content = "!joy " + text
+
+    await bot.process_commands(message)
+
+# ══════════════════════════════════════════════════════════════════
+# GIVEAWAY — REACTION HANDLER
+# ══════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """Cabut badge USER saat user leave server support."""
+    support_server_id = int(os.getenv("SUPPORT_SERVER_ID", "0"))
+    if member.guild.id != support_server_id:
+        return
+    support_members = cfg.get("support_server_members", [])
+    if member.id in support_members:
+        support_members.remove(member.id)
+        save_config(cfg)
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    GIVEAWAY_EMOJI = ICON_GIVEAWAY_REACT if ICON_GIVEAWAY_REACT else "🎉"
+    if str(payload.emoji) != GIVEAWAY_EMOJI:
+        return
+    gw = active_giveaways.get(payload.message_id)
+    if not gw or gw.get("ended"):
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+    if payload.user_id in gw["entries"]:
+        return
+    req_role = gw.get("required_role")
+    if req_role and not any(r.id == req_role for r in member.roles):
+        return
+    gw["entries"].append(payload.user_id)
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if str(payload.emoji) != "🎉":
+        return
+    gw = active_giveaways.get(payload.message_id)
+    if not gw or gw.get("ended"):
+        return
+    if payload.user_id in gw["entries"]:
+        gw["entries"].remove(payload.user_id)
+
+# ══════════════════════════════════════════════════════════════════
+# PREFIX COMMANDS — MODERATION
+# ══════════════════════════════════════════════════════════════════
+
+@bot.command(name="kick", aliases=["k"])
+async def pfx_kick(ctx, member: discord.Member, *, reason: str = "No reason provided."):
+    await do_kick(ctx.guild, ctx.author, member, reason, ctx.send)
+
+@bot.command(name="ban", aliases=["b"])
+async def pfx_ban(ctx, member: discord.Member, *, reason: str = "No reason provided."):
+    await do_ban(ctx.guild, ctx.author, member, reason, ctx.send)
+
+@bot.command(name="unban", aliases=["ub"])
+async def pfx_unban(ctx, user_id: str):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.ban_members:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    try:
+        uid  = int(user_id.strip("<@!>"))
+        await ctx.guild.unban(discord.Object(id=uid), reason=f"By {ctx.author}")
+        await ctx.send(embed=success_embed(f"User `{uid}` di-unban."))
+    except discord.NotFound:
+        await ctx.send(embed=error_embed("User tidak ada di ban list."))
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("Bot tidak punya izin."))
+
+@bot.command(name="timeout", aliases=["to", "mute"])
+async def pfx_timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "No reason provided."):
+    await do_timeout(ctx.guild, ctx.author, member, minutes, reason, ctx.send)
+
+@bot.command(name="untimeout", aliases=["unto", "unmute"])
+async def pfx_untimeout(ctx, member: discord.Member):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    try:
+        await member.timeout(None, reason=f"By {ctx.author}")
+        await ctx.send(embed=success_embed(f"Timeout {member.mention} dilepas."))
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("Bot tidak punya izin."))
+
+@bot.command(name="warn", aliases=["w"])
+async def pfx_warn(ctx, member: discord.Member, *, reason: str = "No reason provided."):
+    await do_warn(ctx.guild, ctx.author, member, reason, ctx.send)
+
+@bot.command(name="warnings", aliases=["warns"])
+async def pfx_warnings(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    gc     = guild_cfg(cfg, ctx.guild.id)
+    warns  = gc.get("warnings", {}).get(str(target.id), [])
+    if not warns:
+        return await ctx.send(embed=info_embed(f"Warnings — {target.display_name}", "Tidak ada warning."))
+    lines = [
+        f"**{i+1}.** {w.get('reason','?')} *(by <@{w.get('warned_by','?')}> — {w.get('timestamp','')[:10]})*"
+        for i, w in enumerate(warns)
+    ]
+    embed = discord.Embed(title=f"Warnings — {target.display_name}", description="\n".join(lines), color=COLOR_WARNING)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.set_footer(text=f"Total: {len(warns)} warning(s) • {BOT_NAME}")
+    await ctx.send(embed=embed)
+
+@bot.command(name="unwarn", aliases=["dw", "delwarn"])
+async def pfx_unwarn(ctx, member: discord.Member, number: int):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_messages:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    gc    = guild_cfg(cfg, ctx.guild.id)
+    warns = gc.get("warnings", {}).get(str(member.id), [])
+    if not warns:
+        return await ctx.send(embed=error_embed(f"{member.display_name} tidak punya warning."))
+    if not 1 <= number <= len(warns):
+        return await ctx.send(embed=error_embed(f"Nomor tidak valid (1–{len(warns)})."))
+    removed = warns.pop(number - 1)
+    save_config(cfg)
+    await ctx.send(embed=success_embed(f"Warning #{number} `{removed.get('reason','?')}` dihapus dari {member.mention}."))
+
+@bot.command(name="clearwarnings", aliases=["cw", "clearwarn"])
+async def pfx_clearwarnings(ctx, member: discord.Member):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_messages:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    gc = guild_cfg(cfg, ctx.guild.id)
+    gc.setdefault("warnings", {})[str(member.id)] = []
+    save_config(cfg)
+    await ctx.send(embed=success_embed(f"Semua warning {member.mention} dihapus."))
+
+@bot.command(name="purge", aliases=["clear", "prune"])
+async def pfx_purge(ctx, amount: int = 10):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_messages:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")), delete_after=5)
+    amount  = max(1, min(100, amount))
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    msg = await ctx.send(embed=success_embed(f"Dihapus {max(0, len(deleted)-1)} pesan."))
+    await asyncio.sleep(4)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+@bot.command(name="lock", aliases=["lockchannel"])
+async def pfx_lock(ctx, channel: discord.TextChannel = None):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_channels:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    ch = channel or ctx.channel
+    ow = ch.overwrites_for(ctx.guild.default_role)
+    ow.send_messages = False
+    try:
+        await ch.set_permissions(ctx.guild.default_role, overwrite=ow, reason=f"Locked by {ctx.author}")
+        await ctx.send(embed=success_embed(f"{ch.mention} dikunci."))
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("Bot tidak punya izin."))
+
+@bot.command(name="unlock", aliases=["unlockchannel"])
+async def pfx_unlock(ctx, channel: discord.TextChannel = None):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_channels:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    ch = channel or ctx.channel
+    ow = ch.overwrites_for(ctx.guild.default_role)
+    ow.send_messages = None
+    try:
+        await ch.set_permissions(ctx.guild.default_role, overwrite=ow, reason=f"Unlocked by {ctx.author}")
+        await ctx.send(embed=success_embed(f"{ch.mention} dibuka."))
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("Bot tidak punya izin."))
+
+@bot.command(name="slowmode", aliases=["sm"])
+async def pfx_slowmode(ctx, seconds: int = 0, channel: discord.TextChannel = None):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_channels:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    ch = channel or ctx.channel
+    seconds = max(0, min(21600, seconds))
+    try:
+        await ch.edit(slowmode_delay=seconds, reason=f"By {ctx.author}")
+        msg = f"Slowmode {ch.mention} dimatikan." if seconds == 0 else f"Slowmode {ch.mention} → **{seconds} detik**."
+        await ctx.send(embed=success_embed(msg))
+    except discord.Forbidden:
+        await ctx.send(embed=error_embed("Bot tidak punya izin."))
+
+# ── ROLE & VOICE ──────────────────────────────────────────────────
+
+@bot.command(name="addrole", aliases=["ar"])
+async def pfx_addrole(ctx, member: discord.Member, role: discord.Role):
+    await do_addrole(ctx.guild, ctx.author, member, role, ctx.send)
+
+@bot.command(name="removerole", aliases=["rr"])
+async def pfx_removerole(ctx, member: discord.Member, role: discord.Role):
+    await do_removerole(ctx.guild, ctx.author, member, role, ctx.send)
+
+@bot.command(name="move", aliases=["mv"])
+async def pfx_move(ctx, member: discord.Member, channel: discord.VoiceChannel):
+    await do_move(ctx.guild, ctx.author, member, channel, ctx.send)
+
+# ── INFO ──────────────────────────────────────────────────────────
+
+@bot.command(name="userinfo", aliases=["ui", "whois"])
+async def pfx_userinfo(ctx, member: discord.Member = None):
+    await do_userinfo(ctx.guild, member or ctx.author, ctx.send)
+
+@bot.command(name="serverinfo", aliases=["si", "guildinfo"])
+async def pfx_serverinfo(ctx):
+    g = ctx.guild
+    embed = discord.Embed(title=g.name, description=g.description or "", color=COLOR_PRIMARY, timestamp=discord.utils.utcnow())
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="Owner",      value=f"<@{g.owner_id}>",                           inline=True)
+    embed.add_field(name="Members",    value=f"{g.member_count:,}",                         inline=True)
+    embed.add_field(name="Created",    value=g.created_at.strftime("%d %b %Y"),              inline=True)
+    embed.add_field(name="Channels",   value=str(len(g.text_channels)),                     inline=True)
+    embed.add_field(name="Voice",      value=str(len(g.voice_channels)),                    inline=True)
+    embed.add_field(name="Roles",      value=str(len(g.roles)),                             inline=True)
+    embed.add_field(name="Emojis",     value=str(len(g.emojis)),                            inline=True)
+    embed.add_field(name="Boost Tier", value=str(g.premium_tier),                           inline=True)
+    embed.add_field(name="Boosts",     value=str(g.premium_subscription_count or 0),        inline=True)
+    embed.set_footer(text=f"{BOT_NAME} • ID: {g.id}")
+    await ctx.send(embed=embed)
+
+@bot.command(name="avatar", aliases=["av", "pfp"])
+async def pfx_avatar(ctx, member: discord.Member = None):
+    await do_avatar(member or ctx.author, ctx.send)
+
+@bot.command(name="ping", aliases=["latency"])
+async def pfx_ping(ctx):
+    await do_ping(ctx.send)
+
+@bot.command(name="addemoji", aliases=["ae", "emoji"])
+async def pfx_addemoji(ctx, emoji_or_url: str = "", *, name: str = ""):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_emojis:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    if not emoji_or_url:
+        return await ctx.send(embed=error_embed("Usage: `!joy addemoji <:emoji:id>` atau `!joy addemoji <url> <name>`"))
+    result = await do_addemoji(ctx.guild, emoji_or_url, name)
+    if result["success"]:
+        emoji = result["emoji"]
+        await ctx.send(embed=success_embed(f"Emoji **{emoji.name}** ditambahkan! {emoji}"))
+    else:
+        await ctx.send(embed=error_embed(result["error"]))
+
+# ── TICKET ────────────────────────────────────────────────────────
+
+@bot.command(name="ticket", aliases=["tickets"])
+async def pfx_ticket(ctx, sub: str = "", *, rest: str = ""):
+    sub = sub.lower()
+    gc  = guild_cfg(cfg, ctx.guild.id)
+
+    if sub == "setup":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        args = rest.split()
+        if len(args) < 2:
+            return await ctx.send(embed=error_embed(
+                "Usage: `ticket setup <category_id> <log_category_id> [role_id] [max]`\n"
+                "*(log_category_id harus berupa Category, tempat log channel tiap ticket akan otomatis dibuat)*"
+            ))
+        try:
+            cat_id     = int(args[0])
+            log_cat_id = int(args[1])
+            role_id    = int(args[2]) if len(args) > 2 and args[2].isdigit() else None
+            max_t      = int(args[3]) if len(args) > 3 else 1
+        except ValueError:
+            return await ctx.send(embed=error_embed("ID harus angka."))
+        cat     = ctx.guild.get_channel(cat_id)
+        log_cat = ctx.guild.get_channel(log_cat_id)
+        if not cat or not isinstance(cat, discord.CategoryChannel):
+            return await ctx.send(embed=error_embed("Ticket category tidak ditemukan / bukan Category."))
+        if not log_cat or not isinstance(log_cat, discord.CategoryChannel):
+            return await ctx.send(embed=error_embed("Log category tidak ditemukan / bukan Category."))
+        gc["ticket"].update({
+            "category":     cat_id,
+            "log_category": log_cat_id,
+            "support_role": role_id,
+            "max_tickets":  max(1, min(5, max_t)),
+        })
+        save_config(cfg)
+        embed = base_embed("Ticket System Configured", None)
+        embed.add_field(name="Ticket Category", value=cat.name,     inline=True)
+        embed.add_field(name="Log Category",    value=log_cat.name, inline=True)
+        embed.add_field(name="Support Role",    value=f"<@&{role_id}>" if role_id else "None", inline=True)
+        embed.add_field(name="Max Tickets",     value=str(gc["ticket"]["max_tickets"]), inline=True)
+        embed.set_footer(text="Setiap ticket baru otomatis dapat log channel sendiri di dalam Log Category.")
+        await ctx.send(embed=embed)
+
+    elif sub == "panel":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        if not gc["ticket"].get("category"):
+            return await ctx.send(embed=error_embed("Jalankan `ticket setup` dulu."))
+        try:
+            parts = shlex.split(rest) if rest.strip() else []
+        except ValueError:
+            parts = rest.split()
+        title_txt = parts[0] if len(parts) > 0 else "Support Tickets"
+        desc_txt  = parts[1] if len(parts) > 1 else "Klik tombol di bawah untuk membuka support ticket."
+        await ctx.send(embed=base_embed(title_txt, desc_txt), view=TicketPanelView())
+
+    elif sub == "close":
+        rec = gc["active_tickets"].get(str(ctx.channel.id))
+        if not rec:
+            return await ctx.send(embed=error_embed("Channel ini bukan ticket aktif."))
+        if (ctx.author.id != bot.owner_id
+                and not ctx.author.guild_permissions.manage_channels
+                and rec.get("owner") != ctx.author.id):
+            return await ctx.send(embed=error_embed("Kamu tidak bisa menutup ticket ini."))
+        reason_txt = rest.strip() if rest.strip() else "Closed via command."
+        await close_ticket(ctx.guild, ctx.channel, ctx.author, reason_txt)
+
+    else:
+        await ctx.send(embed=info_embed(
+            "Ticket",
+            '`ticket setup <cat_id> <log_category_id> [role_id] [max]`\n'
+            '`ticket panel "Judul" "Deskripsi"` — deskripsi opsional\n'
+            '`ticket close [reason]`'
+        ))
+
+# ── SCHEDULED EVENT ──────────────────────────────────────────────
+
+_DURATION_RE = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?")
+
+def _parse_duration_secs(text: str) -> Optional[int]:
+    m = _DURATION_RE.fullmatch(text.lower().strip())
+    if not m or not any(m.group(x) for x in (1, 2, 3)):
+        return None
+    return int(m.group(1) or 0) * 86400 + int(m.group(2) or 0) * 3600 + int(m.group(3) or 0) * 60
+
+_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+def _valid_url(url: str) -> bool:
+    return bool(url) and bool(_URL_RE.match(url.strip()))
+
+async def _create_scheduled_event(guild: discord.Guild, name: str, starts_in: str,
+                                   announce_channel: Optional[discord.TextChannel],
+                                   description: Optional[str],
+                                   voice_channel: Optional[discord.abc.GuildChannel] = None,
+                                   duration_str: Optional[str] = None,
+                                   button_url: Optional[str] = None,
+                                   button_label: Optional[str] = None):
+    """
+    Bikin native Discord Scheduled Event, DAN kirim notifikasi/pengumumannya
+    ke text channel biasa (announce_channel) — bukan cuma nongol di tab Events doang.
+    voice_channel opsional, cuma dipakai kalau event-nya beneran mau di voice/stage channel.
+    duration_str opsional (format sama seperti starts_in, misal "3h") — kalau kosong, default 2 jam.
+    button_url opsional — kalau diisi dan valid (http/https), embed pengumuman dapat tombol
+    link yang bisa diklik. Kalau kosong atau tidak valid, tombol otomatis tidak ditampilkan.
+    """
+    delta_secs = _parse_duration_secs(starts_in)
+    if delta_secs is None:
+        return None, error_embed("Format waktu mulai: `1h`, `30m`, `2h30m`, `1d`.")
+    if delta_secs < 300:
+        return None, error_embed("Waktu mulai minimal 5 menit dari sekarang.")
+
+    duration_secs = 7200  # default 2 jam kalau gak diisi
+    if duration_str:
+        parsed_duration = _parse_duration_secs(duration_str)
+        if parsed_duration is None:
+            return None, error_embed("Format durasi event: `1h`, `30m`, `2h30m`, `1d`.")
+        if parsed_duration < 300:
+            return None, error_embed("Durasi event minimal 5 menit.")
+        duration_secs = parsed_duration
+
+    start_time = discord.utils.utcnow() + datetime.timedelta(seconds=delta_secs)
+    end_time   = start_time + datetime.timedelta(seconds=duration_secs)
+    kwargs = {
+        "name":          name,
+        "start_time":    start_time,
+        "description":   description or "\u200b",
+        "privacy_level": discord.PrivacyLevel.guild_only,
+    }
+
+    is_voice_event = isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel))
+    if is_voice_event:
+        kwargs["channel"]     = voice_channel
+        kwargs["entity_type"] = (discord.EntityType.stage_instance
+                                  if isinstance(voice_channel, discord.StageChannel)
+                                  else discord.EntityType.voice)
+        kwargs["end_time"]    = end_time  # opsional buat voice/stage, tapi tetap kita set biar konsisten
+    else:
+        kwargs["entity_type"] = discord.EntityType.external
+        kwargs["location"]    = (announce_channel.mention if announce_channel else guild.name)
+        kwargs["end_time"]    = end_time  # wajib buat external
+
+    try:
+        event = await guild.create_scheduled_event(**kwargs)
+    except discord.Forbidden:
+        return None, error_embed("Bot butuh permission **Manage Events** buat bikin scheduled event.")
+    except Exception as e:
+        return None, error_embed(f"Gagal membuat event: {e}")
+
+    # ── Validasi tombol link (opsional) ─────────────────────────────────────
+    has_button = _valid_url(button_url) if button_url else False
+    label      = (button_label or "Selengkapnya").strip()[:80] or "Selengkapnya"
+
+    # ── Kirim notifikasi/pengumuman ke text channel biasa ───────────────────
+    if announce_channel:
+        announce = discord.Embed(
+            title=f"📅 {event.name}",
+            description=(description.strip() if description else "*Tidak ada deskripsi tambahan.*"),
+            color=COLOR_PRIMARY,
+        )
+        announce.add_field(name="\u200b", value="▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", inline=False)
+        announce.add_field(
+            name="🕒 Mulai",
+            value=discord.utils.format_dt(start_time, "F") + "\n" + discord.utils.format_dt(start_time, "R"),
+            inline=True
+        )
+        announce.add_field(
+            name="🕔 Selesai (perkiraan)",
+            value=discord.utils.format_dt(end_time, "F") + "\n" + discord.utils.format_dt(end_time, "R"),
+            inline=True
+        )
+        if is_voice_event:
+            announce.add_field(name="📍 Lokasi", value=voice_channel.mention, inline=True)
+        announce.add_field(name="🔗 Info & RSVP", value=f"[Klik di sini]({event.url})", inline=True)
+        announce.set_footer(text=f"{BOT_NAME} • {BOT_TAGLINE}")
+        announce.timestamp = start_time  # timestamp embed mengikuti waktu mulai event
+
+        view = None
+        if has_button:
+            view = discord.ui.View(timeout=None)
+            view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=button_url.strip()))
+
+        try:
+            if view:
+                await announce_channel.send(embed=announce, view=view)
+            else:
+                await announce_channel.send(embed=announce)
+        except Exception:
+            pass
+
+    confirm = base_embed("Event Created", None, color=COLOR_SUCCESS)
+    confirm.add_field(name="Nama",     value=event.name, inline=True)
+    confirm.add_field(name="Mulai",    value=discord.utils.format_dt(start_time, "R"), inline=True)
+    confirm.add_field(name="Selesai",  value=discord.utils.format_dt(end_time, "R"), inline=True)
+    confirm.add_field(name="Notifikasi", value=announce_channel.mention if announce_channel else "Tidak dikirim", inline=True)
+    if button_url:
+        confirm.add_field(
+            name="Tombol Link",
+            value=(f"✅ **{label}** → {button_url.strip()}" if has_button else "⚠️ URL tidak valid (harus diawali http/https) — tombol dilewati"),
+            inline=True
+        )
+    confirm.add_field(name="Link",     value=f"[Klik di sini]({event.url})", inline=False)
+    return event, confirm
+
+@bot.command(name="event", aliases=["events", "ev"])
+async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
+    sub = sub.lower()
+
+    if sub == "create":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_events:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        try:
+            parts = shlex.split(rest) if rest.strip() else []
+        except ValueError:
+            parts = rest.split()
+
+        # Tarik flag --duration dan --button dari mana pun posisinya, sisanya tetap positional
+        duration_str  = None
+        button_url    = None
+        button_label  = None
+        filtered = []
+        idx = 0
+        while idx < len(parts):
+            low_part = parts[idx].lower()
+            if low_part == "--duration" and idx + 1 < len(parts):
+                duration_str = parts[idx + 1]
+                idx += 2
+            elif low_part == "--button" and idx + 1 < len(parts):
+                button_url = parts[idx + 1]
+                # Label opsional: token berikutnya kalau bukan flag lain
+                if idx + 2 < len(parts) and not parts[idx + 2].startswith("--"):
+                    button_label = parts[idx + 2]
+                    idx += 3
+                else:
+                    idx += 2
+            else:
+                filtered.append(parts[idx])
+                idx += 1
+        parts = filtered
+
+        if len(parts) < 2:
+            return await ctx.send(embed=error_embed(
+                'Usage: `event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]]`\n'
+                "`#channel` = text channel buat kirim notifikasi (default: channel ini).\n"
+                "Kalau isi `#channel` dengan voice/stage channel, event-nya bakal dibikin di situ.\n"
+                "`--duration` opsional buat atur berapa lama event berlangsung (default: 2 jam).\n"
+                "`--button` opsional buat nambahin tombol link di embed pengumuman (URL harus http/https). Kalau tidak diisi, tombol tidak muncul.\n"
+                'Contoh: `event create "Movie Night" 2h #pengumuman "Nonton bareng!" --duration 3h --button https://example.com "Daftar Sekarang"`'
+            ))
+        name, starts_in = parts[0], parts[1]
+        channel_arg  = parts[2] if len(parts) > 2 else None
+        description  = parts[3] if len(parts) > 3 else None
+
+        channel_obj = None
+        if ctx.message.channel_mentions:
+            channel_obj = ctx.message.channel_mentions[0]
+        elif channel_arg and channel_arg.strip("<#>").isdigit():
+            channel_obj = ctx.guild.get_channel(int(channel_arg.strip("<#>")))
+
+        voice_channel    = channel_obj if isinstance(channel_obj, (discord.VoiceChannel, discord.StageChannel)) else None
+        announce_channel = channel_obj if isinstance(channel_obj, discord.TextChannel) else ctx.channel
+
+        _, embed = await _create_scheduled_event(
+            ctx.guild, name, starts_in, announce_channel, description, voice_channel, duration_str,
+            button_url, button_label
+        )
+        await ctx.send(embed=embed)
+
+    elif sub == "list":
+        events = await ctx.guild.fetch_scheduled_events()
+        if not events:
+            return await ctx.send(embed=info_embed("Scheduled Events", "Belum ada event yang dijadwalkan."))
+        lines = [f"**{ev.name}** — {discord.utils.format_dt(ev.start_time, 'R')} · [Link]({ev.url})" for ev in events]
+        await ctx.send(embed=info_embed("Scheduled Events", "\n".join(lines)))
+
+    elif sub == "cancel":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_events:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        if not rest.strip().isdigit():
+            return await ctx.send(embed=error_embed("Usage: `event cancel <event_id>`"))
+        try:
+            event = await ctx.guild.fetch_scheduled_event(int(rest.strip()))
+            await event.delete()
+            await ctx.send(embed=success_embed(f"Event **{event.name}** dibatalkan."))
+        except discord.NotFound:
+            await ctx.send(embed=error_embed("Event tidak ditemukan."))
+        except Exception as e:
+            await ctx.send(embed=error_embed(f"Gagal membatalkan event: {e}"))
+
+    else:
+        await ctx.send(embed=info_embed(
+            "Scheduled Event",
+            'Usage: `event create "<nama>" <mulai_dalam> [#voice|"<lokasi>"] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]]`\n'
+            "`event list` · `event cancel <event_id>`"
+        ))
+
+# ── GIVEAWAY ─────────────────────────────────────────────────────
+
+@bot.command(name="giveaway", aliases=["gw", "giveaways"])
+async def pfx_giveaway(ctx, sub: str = "", *args):
+    sub = sub.lower()
+    if sub == "list":
+        gws = [gw for gw in active_giveaways.values() if gw.get("guild_id") == ctx.guild.id]
+        if not gws: return await ctx.send(embed=info_embed("Giveaways", "Tidak ada giveaway aktif."))
+        embed = discord.Embed(title="Active Giveaways", color=COLOR_PRIMARY, timestamp=discord.utils.utcnow())
+        for gw in gws[:10]:
+            ends_dt = datetime.datetime.utcfromtimestamp(gw["ends_ts"]).replace(tzinfo=datetime.timezone.utc)
+            ch = bot.get_channel(gw["channel_id"])
+            embed.add_field(name=gw["prize"],
+                value=f"Channel: {ch.mention if ch else '?'} · Ends: {discord.utils.format_dt(ends_dt,'R')}\nWinners: {gw['winner_count']} · Entries: {len(gw['entries'])} · ID: `{gw['message_id']}`",
+                inline=False)
+        await ctx.send(embed=embed)
+    elif sub == "end":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        if not args: return await ctx.send(embed=error_embed("Usage: `giveaway end <message_id>`"))
+        try: mid = int(args[0])
+        except ValueError: return await ctx.send(embed=error_embed("ID harus angka."))
+        gw = active_giveaways.get(mid)
+        if not gw or gw["guild_id"] != ctx.guild.id: return await ctx.send(embed=error_embed("Giveaway tidak ditemukan."))
+        await ctx.send(embed=info_embed("", f"Mengakhiri **{gw['prize']}**..."))
+        await end_giveaway(gw)
+    elif sub == "reroll":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        if not args: return await ctx.send(embed=error_embed("Usage: `giveaway reroll <message_id> [count]`"))
+        try: mid = int(args[0]); count = int(args[1]) if len(args) > 1 else 1
+        except ValueError: return await ctx.send(embed=error_embed("ID dan count harus angka."))
+        try: msg = await ctx.channel.fetch_message(mid)
+        except discord.NotFound: return await ctx.send(embed=error_embed("Pesan tidak ditemukan."))
+        entries = []
+        for reaction in msg.reactions:
+            if str(reaction.emoji) == "🎉":
+                async for user in reaction.users():
+                    if not user.bot: entries.append(user.id)
+                break
+        if not entries: return await ctx.send(embed=error_embed("Tidak ada peserta."))
+        count   = max(1, min(count, len(entries)))
+        winners = random.sample(list(set(entries)), count)
+        ws      = " ".join(f"<@{w}>" for w in winners)
+        embed   = discord.Embed(title="Giveaway Rerolled!", description=f"Pemenang baru: {ws}", color=COLOR_SUCCESS, timestamp=discord.utils.utcnow())
+        embed.set_footer(text=BOT_NAME)
+        await ctx.send(content=ws, embed=embed)
+    elif sub == "start":
+        if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+            return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+        if len(args) < 3:
+            return await ctx.send(embed=error_embed("Usage: `giveaway start <durasi> <winners> <prize>`\nOptional: `--role <id>` `--winrole <id>`"))
+        dur_str = args[0].lower()
+        m_dur   = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?", dur_str)
+        if not m_dur or not any(m_dur.group(x) for x in (1,2,3)):
+            return await ctx.send(embed=error_embed("Format durasi: `1h`, `30m`, `2h30m`, `1d`"))
+        dur_secs = int(m_dur.group(1) or 0)*86400 + int(m_dur.group(2) or 0)*3600 + int(m_dur.group(3) or 0)*60
+        if not dur_secs or dur_secs > 7*86400:
+            return await ctx.send(embed=error_embed("Durasi 1 menit – 7 hari."))
+        try:
+            winner_count = int(args[1])
+            if not 1 <= winner_count <= 20: raise ValueError
+        except ValueError:
+            return await ctx.send(embed=error_embed("Winners 1–20."))
+        rest = list(args[2:]); req_role_id = win_role_id = None; prize_parts = []; i = 0
+        while i < len(rest):
+            if rest[i] == "--role" and i+1 < len(rest):
+                try: req_role_id = int(rest[i+1])
+                except ValueError: pass
+                i += 2
+            elif rest[i] == "--winrole" and i+1 < len(rest):
+                try: win_role_id = int(rest[i+1])
+                except ValueError: pass
+                i += 2
+            else:
+                prize_parts.append(rest[i]); i += 1
+        prize = " ".join(prize_parts).strip()
+        if not prize: return await ctx.send(embed=error_embed("Nama hadiah tidak boleh kosong."))
+        req_role = ctx.guild.get_role(req_role_id) if req_role_id else None
+        win_role = ctx.guild.get_role(win_role_id) if win_role_id else None
+        ends_ts  = discord.utils.utcnow().timestamp() + dur_secs
+        gw = {"prize": prize, "description": "", "winner_count": winner_count,
+              "host_id": ctx.author.id, "channel_id": ctx.channel.id, "guild_id": ctx.guild.id,
+              "ends_ts": ends_ts, "entries": [], "winners": [], "ended": False, "message_id": 0,
+              "required_role": req_role.id if req_role else None,
+              "winner_role_id": win_role.id if win_role else None}
+        gw_embed = build_giveaway_embed(gw)
+        try:
+            msg = await ctx.channel.send(embed=gw_embed)
+            await msg.add_reaction(ICON_GIVEAWAY_REACT if ICON_GIVEAWAY_REACT else "🎉")
+        except discord.Forbidden:
+            return await ctx.send(embed=error_embed("Bot tidak bisa kirim pesan di channel ini."))
+        gw["message_id"] = msg.id
+        active_giveaways[msg.id] = gw
+        async def _timer():
+            await asyncio.sleep(dur_secs)
+            if msg.id in active_giveaways: await end_giveaway(active_giveaways[msg.id])
+        asyncio.create_task(_timer())
+        ends_dt = datetime.datetime.utcfromtimestamp(ends_ts).replace(tzinfo=datetime.timezone.utc)
+        confirm = success_embed(f"Giveaway dimulai!\n\nPrize: {prize}\nWinners: {winner_count}\nEnds: {discord.utils.format_dt(ends_dt,'R')}")
+        if req_role: confirm.add_field(name="Required Role", value=req_role.mention, inline=True)
+        if win_role: confirm.add_field(name="Winner Role",   value=win_role.mention, inline=True)
+        await ctx.send(embed=confirm)
+    else:
+        await ctx.send(embed=info_embed("Giveaway",
+            "`giveaway start <durasi> <winners> <prize>`\n"
+            "  Optional: `--role <id>` `--winrole <id>`\n"
+            "`giveaway end <msg_id>` · `giveaway reroll <msg_id>` · `giveaway list`"))
+
+# ── ANTISPAM HONEYPOT ─────────────────────────────────────────────
+
+@bot.command(name="antispam", aliases=["as"])
+async def pfx_antispam(ctx, sub: str = "", *, args: str = ""):
+    if ctx.author.id != bot.owner_id and not ctx.author.guild_permissions.manage_guild:
+        return await ctx.send(embed=error_embed(t(cfg, ctx.guild.id, "no_perm")))
+    gc  = guild_cfg(cfg, ctx.guild.id)
+    sub = sub.lower()
+    if sub == "setchannel":
+        if not args:
+            gc["spam_trap_channel"] = None
+            save_config(cfg)
+            return await ctx.send(embed=success_embed("Honeypot channel dinonaktifkan."))
+        ch = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else (ctx.guild.get_channel(int(args.strip())) if args.strip().isdigit() else None)
+        if not ch: return await ctx.send(embed=error_embed("Channel tidak ditemukan."))
+        gc["spam_trap_channel"] = ch.id
+        save_config(cfg)
+        await ctx.send(embed=base_embed("Honeypot Aktif", ch.mention + " — siapapun yang kirim pesan di sini langsung di-ban.", color=COLOR_ERROR))
+    elif sub == "status":
+        trap   = gc.get("spam_trap_channel")
+        ch     = ctx.guild.get_channel(trap) if trap else None
+        log_id = gc.get("mod_log_channel")
+        log_ch = ctx.guild.get_channel(log_id) if log_id else None
+        embed  = base_embed("Honeypot Status", "Aktif di " + ch.mention if ch else "Tidak aktif.", color=COLOR_ERROR if ch else COLOR_INFO)
+        embed.add_field(name="Log Channel", value=log_ch.mention if log_ch else "Belum diatur", inline=True)
+        await ctx.send(embed=embed)
+    elif sub == "logchannel":
+        if not args:
+            gc["mod_log_channel"] = None
+            save_config(cfg)
+            return await ctx.send(embed=success_embed("Mod log channel dinonaktifkan."))
+        ch = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else (ctx.guild.get_channel(int(args.strip())) if args.strip().isdigit() else None)
+        if not ch: return await ctx.send(embed=error_embed("Channel tidak ditemukan."))
+        gc["mod_log_channel"] = ch.id
+        save_config(cfg)
+        await ctx.send(embed=success_embed(f"Mod log channel diset ke {ch.mention}."))
+    else:
+        await ctx.send(embed=info_embed("Antispam Honeypot", "`antispam setchannel #channel`\n`antispam setchannel` (nonaktifkan)\n`antispam logchannel #channel`\n`antispam status`"))
+
+# ── OWNER COMMANDS ────────────────────────────────────────────────
+
+@bot.command(name="noprefix", aliases=["np"])
+@is_owner()
+async def pfx_noprefix(ctx, action: str = "", *, target: str = ""):
+    action    = action.lower()
+    np_users  = cfg.setdefault("no_prefix_users",  [])
+    np_guilds = cfg.setdefault("no_prefix_guilds", [])
+    if action == "list":
+        u_lines = [f"<@{uid}> (`{uid}`)" for uid in np_users] or ["*(none)*"]
+        g_lines = []
+        for gid in np_guilds:
+            g = bot.get_guild(gid)
+            g_lines.append(f"**{g.name}** (`{gid}`)" if g else f"`{gid}`")
+        g_lines = g_lines or ["*(none)*"]
+        embed = base_embed("No-Prefix Access List", None)
+        embed.add_field(name="Users",  value="\n".join(u_lines), inline=False)
+        embed.add_field(name="Guilds", value="\n".join(g_lines), inline=False)
+        return await ctx.send(embed=embed)
+    if action not in ("grant","revoke"):
+        return await ctx.send(embed=info_embed("No-Prefix",
+            "`noprefix grant @user/guild_id`\n`noprefix revoke @user/guild_id`\n`noprefix list`"))
+    if not target: return await ctx.send(embed=error_embed("Masukkan @user atau guild ID."))
+    uid_match = re.match(r"<@!?(\d+)>|(\d{17,20})", target.strip())
+    if not uid_match: return await ctx.send(embed=error_embed("Target tidak valid."))
+    parsed_id = int(uid_match.group(1) or uid_match.group(2))
+    g = bot.get_guild(parsed_id)
+    if g:
+        if action == "grant":
+            if parsed_id not in np_guilds: np_guilds.append(parsed_id)
+            save_config(cfg)
+            await ctx.send(embed=success_embed(f"No-prefix diaktifkan untuk server **{g.name}**."))
+        else:
+            if parsed_id in np_guilds: np_guilds.remove(parsed_id)
+            save_config(cfg)
+            await ctx.send(embed=success_embed(f"No-prefix dicabut dari server **{g.name}**."))
+    else:
+        try: user = await bot.fetch_user(parsed_id)
+        except Exception: return await ctx.send(embed=error_embed("User/Guild tidak ditemukan."))
+        if action == "grant":
+            if parsed_id not in np_users: np_users.append(parsed_id)
+            save_config(cfg)
+            try:
+                dm = base_embed("No-Prefix Access Granted!", "Kamu bisa gunain command JOY UNIVERSE tanpa prefix!\nCukup ketik nama command langsung.", color=COLOR_SUCCESS)
+                await user.send(embed=dm)
+            except Exception: pass
+            await ctx.send(embed=success_embed(f"No-prefix diaktifkan untuk {user.mention}."))
+        else:
+            if parsed_id in np_users: np_users.remove(parsed_id)
+            save_config(cfg)
+            await ctx.send(embed=success_embed(f"No-prefix dicabut dari {user.mention}."))
+
+@bot.command(name="botrole", aliases=["br"])
+@is_owner()
+async def pfx_botrole(ctx, action: str = "", member: discord.Member = None, role: str = ""):
+    action    = action.lower()
+    bot_roles = cfg.setdefault("bot_roles", {})
+    if action == "list":
+        if not bot_roles: return await ctx.send(embed=info_embed("Bot Roles", "Belum ada assignment."))
+        lines = []
+        for uid_str, r in bot_roles.items():
+            user = bot.get_user(int(uid_str))
+            name = user.display_name if user else f"ID {uid_str}"
+            lines.append(f"**{name}** → {r.capitalize()}")
+        return await ctx.send(embed=info_embed("Bot Roles", "\n".join(lines)))
+    if not member:
+        return await ctx.send(embed=info_embed("Bot Role", "`botrole set @user <staff/management/developer>`\n`botrole remove @user`\n`botrole list`"))
+    if action == "set":
+        role = role.lower()
+        if role not in ["staff","management","developer"]:
+            return await ctx.send(embed=error_embed("Role valid: `staff`, `management`, `developer`"))
+        bot_roles[str(member.id)] = role
+        save_config(cfg)
+        info = BOT_ROLE_BADGES[role]
+        embed = discord.Embed(title="Bot Role Assigned", description=f"{member.mention} → **{info['label']}**", color=info["color"], timestamp=discord.utils.utcnow())
+        embed.set_thumbnail(url=member.display_avatar.url)
+        try:
+            dm = discord.Embed(title="Bot Role Granted!", description=f"Kamu mendapat role **{info['label']}** di {BOT_NAME}!", color=info["color"])
+            await member.send(embed=dm)
+        except Exception: pass
+        await ctx.send(embed=embed)
+    elif action == "remove":
+        if str(member.id) not in bot_roles: return await ctx.send(embed=error_embed(f"{member.display_name} tidak punya bot role."))
+        removed = bot_roles.pop(str(member.id))
+        save_config(cfg)
+        await ctx.send(embed=success_embed(f"Bot role **{removed.capitalize()}** dihapus dari {member.mention}."))
+
+@bot.command(name="grantpremium", aliases=["gp", "premium"])
+@is_owner()
+async def pfx_grantpremium(ctx, member: discord.Member = None, duration: str = ""):
+    if not member:
+        return await ctx.send(embed=info_embed("Grant Premium", "`grantpremium @user <7d/30d/permanent>` · `grantpremium @user revoke`"))
+    premium_users  = cfg.setdefault("premium_users",  [])
+    premium_expiry = cfg.setdefault("premium_expiry", {})
+    if duration.lower() == "revoke":
+        if member.id in premium_users: premium_users.remove(member.id)
+        premium_expiry.pop(str(member.id), None)
+        save_config(cfg)
+        try:
+            await member.send(embed=base_embed("Premium Ended", f"Premium {BOT_NAME} kamu telah berakhir.", color=COLOR_ERROR))
+        except Exception: pass
+        return await ctx.send(embed=success_embed(f"Premium dicabut dari {member.mention}."))
+    expiry_dt = None
+    if duration.lower() != "permanent":
+        m = re.fullmatch(r"(\d+)(d|h|m)", duration.lower())
+        if not m: return await ctx.send(embed=error_embed("Format: `7d`, `30d`, `24h`, `permanent`"))
+        amount = int(m.group(1)); unit = m.group(2)
+        delta  = {"d": datetime.timedelta(days=amount), "h": datetime.timedelta(hours=amount), "m": datetime.timedelta(minutes=amount)}[unit]
+        expiry_dt = datetime.datetime.now(datetime.timezone.utc) + delta
+    if member.id not in premium_users: premium_users.append(member.id)
+    if expiry_dt: premium_expiry[str(member.id)] = expiry_dt.isoformat()
+    else: premium_expiry.pop(str(member.id), None)
+    save_config(cfg)
+    dur_display = "Permanent" if not expiry_dt else discord.utils.format_dt(expiry_dt, "R")
+    embed = discord.Embed(title="Premium Granted!", description=f"{member.mention} sekarang **Premium**!\nExpires: {dur_display}", color=COLOR_WARNING, timestamp=discord.utils.utcnow())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        dm = discord.Embed(title="Premium Activated!", description=f"Premium {BOT_NAME} aktif!\nExpires: {dur_display}\n\nSemua fitur premium terbuka.", color=COLOR_WARNING)
+        await member.send(embed=dm)
+    except Exception: pass
+    await ctx.send(embed=embed)
+
+def _apply_premium_marker(name: str, locked: bool) -> None:
+    """Tandai/bersihkan prefix [💎] di description slash command yang di-lock premium."""
+    cmd = bot.tree.get_command(name)
+    if not cmd:
+        return
+    base = ORIGINAL_CMD_DESCRIPTIONS.get(name, cmd.description.removeprefix("[\U0001F48E] "))
+    cmd.description = ("[\U0001F48E] " + base) if locked else base
+
+@bot.command(name="premiumlock", aliases=["pl", "plock"])
+@is_owner()
+async def pfx_premiumlock(ctx, action: str = "", *, command_name: str = ""):
+    """Atur command apa saja yang cuma bisa dipakai user Premium."""
+    action = action.lower()
+    locked = cfg.setdefault("premium_commands", [])
+    known_slash = {c.name for c in bot.tree.get_commands()}
+
+    def _resolve_name(raw: str) -> Optional[str]:
+        """Terima nama command ATAU alias-nya, kembalikan nama asli (qualified_name)."""
+        raw_lower = raw.strip().lower()
+        prefix_cmd = bot.get_command(raw_lower)
+        if prefix_cmd:
+            return prefix_cmd.qualified_name
+        if raw_lower in known_slash:
+            return raw_lower
+        return None
+
+    if action in ("add", "lock"):
+        raw = command_name.strip().lower()
+        if not raw:
+            return await ctx.send(embed=error_embed("Sebutkan nama command. Contoh: `premiumlock add rank`"))
+        name = _resolve_name(raw)
+        if not name:
+            return await ctx.send(embed=error_embed(f"Command `{raw}` tidak ditemukan."))
+        if name in OWNER_ONLY_CMDS:
+            return await ctx.send(embed=error_embed("Command owner-only tidak bisa di-lock premium."))
+        if name in locked:
+            return await ctx.send(embed=error_embed(f"Command `{name}` sudah di-lock."))
+        locked.append(name)
+        save_config(cfg)
+        _apply_premium_marker(name, True)
+        try:
+            await bot.tree.sync()
+        except Exception:
+            pass
+        await ctx.send(embed=success_embed(f"Command `{name}` sekarang **Premium Only**."))
+
+    elif action in ("remove", "unlock"):
+        raw = command_name.strip().lower()
+        name = _resolve_name(raw) or raw
+        if name not in locked:
+            return await ctx.send(embed=error_embed(f"Command `{name}` tidak sedang di-lock."))
+        locked.remove(name)
+        save_config(cfg)
+        _apply_premium_marker(name, False)
+        try:
+            await bot.tree.sync()
+        except Exception:
+            pass
+        await ctx.send(embed=success_embed(f"Command `{name}` sudah bisa dipakai semua user lagi."))
+
+    elif action == "list":
+        if not locked:
+            return await ctx.send(embed=info_embed("Premium Locked Commands", "Belum ada command yang di-lock."))
+        await ctx.send(embed=info_embed("Premium Locked Commands", "\n".join(f"`{c}`" for c in locked)))
+
+    else:
+        await ctx.send(embed=info_embed(
+            "Premium Lock",
+            "`premiumlock add <command>` — kunci command untuk premium only\n"
+            "`premiumlock remove <command>` — buka kunci\n"
+            "`premiumlock list` — lihat semua command yang di-lock"
+        ))
+
+@bot.command(name="maintenance", aliases=["maint", "mn"])
+@is_owner()
+async def pfx_maintenance(ctx, action: str = "status", *, reason: str = ""):
+    """Kunci seluruh command bot kecuali untuk owner."""
+    action = action.lower()
+    state  = cfg.setdefault("maintenance", {"enabled": False, "reason": ""})
+
+    if action == "on":
+        state["enabled"] = True
+        state["reason"]  = reason or "Sedang ada perbaikan sistem."
+        save_config(cfg)
+        await ctx.send(embed=base_embed(
+            "Maintenance Mode: ON",
+            f"Semua command dikunci kecuali untuk owner.\n**Alasan:** {state['reason']}",
+            color=COLOR_WARNING
+        ))
+    elif action == "off":
+        state["enabled"] = False
+        save_config(cfg)
+        await ctx.send(embed=success_embed("Maintenance mode dimatikan. Semua command sudah normal kembali."))
+    elif action == "status":
+        status_txt = "🟢 OFF" if not state["enabled"] else "🔴 ON"
+        desc = f"Status: **{status_txt}**"
+        if state["enabled"] and state.get("reason"):
+            desc += f"\nAlasan: {state['reason']}"
+        await ctx.send(embed=info_embed("Maintenance Status", desc))
+    else:
+        await ctx.send(embed=info_embed(
+            "Maintenance",
+            "`maintenance on [reason]` · `maintenance off` · `maintenance status`"
+        ))
+
+@bot.command(name="syncsupport", aliases=["sync"])
+@is_owner()
+async def pfx_syncsupport(ctx):
+    """Backfill badge USER untuk semua member yang sudah ada di server support."""
+    support_server_id = int(os.getenv("SUPPORT_SERVER_ID", "0"))
+    if not support_server_id:
+        return await ctx.send(embed=error_embed("`SUPPORT_SERVER_ID` belum di-set di environment variable."))
+    guild = bot.get_guild(support_server_id)
+    if not guild:
+        return await ctx.send(embed=error_embed("Bot tidak berada di server support tersebut (cek `SUPPORT_SERVER_ID`)."))
+    support_members = cfg.setdefault("support_server_members", [])
+    added = 0
+    for m in guild.members:
+        if m.bot:
+            continue
+        if m.id not in support_members:
+            support_members.append(m.id)
+            added += 1
+    save_config(cfg)
+    await ctx.send(embed=success_embed(
+        f"Sync selesai. **{added}** member baru dapat badge **USER**.\nTotal member ber-badge: **{len(support_members)}**."
+    ))
+
+@bot.command(name="blacklist", aliases=["bl"])
+@is_owner()
+async def pfx_blacklist(ctx, action: str = "", guild_id: str = ""):
+    bl = cfg.setdefault("blacklisted_guilds", [])
+    if action == "add":
+        try: gid = int(guild_id)
+        except ValueError: return await ctx.send(embed=error_embed("Guild ID harus angka."))
+        if gid not in bl: bl.append(gid)
+        save_config(cfg)
+        g = bot.get_guild(gid)
+        if g:
+            try: await g.leave()
+            except Exception: pass
+        await ctx.send(embed=success_embed(f"Guild `{gid}` di-blacklist dan bot leave."))
+    elif action == "remove":
+        try: gid = int(guild_id)
+        except ValueError: return await ctx.send(embed=error_embed("Guild ID harus angka."))
+        if gid in bl: bl.remove(gid)
+        save_config(cfg)
+        await ctx.send(embed=success_embed(f"Guild `{gid}` di-unblacklist."))
+    elif action == "list":
+        if not bl: return await ctx.send(embed=info_embed("Blacklist", "Tidak ada guild yang di-blacklist."))
+        lines = []
+        for gid in bl:
+            g = bot.get_guild(gid)
+            lines.append(f"**{g.name}** (`{gid}`)" if g else f"`{gid}`")
+        await ctx.send(embed=info_embed("Blacklisted Guilds", "\n".join(lines)))
+    else:
+        await ctx.send(embed=info_embed("Blacklist", "`blacklist add <guild_id>`\n`blacklist remove <guild_id>`\n`blacklist list`"))
+
+@bot.command(name="vxleave", aliases=["forceleave", "leaveguild"])
+@is_owner()
+async def pfx_vxleave(ctx, guild_id: str = ""):
+    if not guild_id:
+        await ctx.send(embed=info_embed("Leave Guild", "`vxleave <guild_id>`"))
+        return
+    try: gid = int(guild_id)
+    except ValueError: return await ctx.send(embed=error_embed("Guild ID harus angka."))
+    g = bot.get_guild(gid)
+    if not g: return await ctx.send(embed=error_embed("Bot tidak ada di guild tersebut."))
+    await ctx.send(embed=success_embed(f"Leaving **{g.name}**..."))
+    await g.leave()
+
+# ── HELP ─────────────────────────────────────────────────────────
+
+HELP_CATEGORIES = {
+    "moderation": {
+        "label": "Moderation", "emoji": "🛡️",
+        "value": (
+            "`kick` · `ban` · `unban` · `timeout` · `untimeout`\n"
+            "`warn` · `warnings` · `unwarn` · `clearwarnings`\n"
+            "`purge` · `lock` · `unlock` · `slowmode`"
+        ),
+    },
+    "role": {
+        "label": "Role & Voice", "emoji": "🎭",
+        "value": "`addrole` · `removerole` · `move`",
+    },
+    "info": {
+        "label": "Info", "emoji": "ℹ️",
+        "value": "`userinfo` · `serverinfo` · `avatar` · `ping` · `addemoji`",
+    },
+    "ticket": {
+        "label": "Ticket", "emoji": "🎫",
+        "value": (
+            '`ticket setup <cat_id> <log_category_id> [role] [max]`\n'
+            '`ticket panel "Judul" "Deskripsi"` — deskripsi opsional\n'
+            '`ticket close [reason]`'
+        ),
+    },
+    "event": {
+        "label": "Scheduled Event", "emoji": "📅",
+        "value": (
+            '`event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]]`\n'
+            "`#channel` = text channel notifikasi (default: channel ini)\n"
+            "`--duration` = lama event berlangsung (default: 2 jam)\n"
+            "`--button` = tombol link opsional di embed pengumuman (kosongkan = tidak muncul)\n"
+            "`event list` · `event cancel <event_id>`\n"
+            "Slash: `/createvent`"
+        ),
+    },
+    "giveaway": {
+        "label": "Giveaway", "emoji": "🎉",
+        "value": "`giveaway start/end/reroll/list`\nOptional: `--role <id>` · `--winrole <id>`",
+    },
+    "antispam": {
+        "label": "Antispam", "emoji": "🚫",
+        "value": "`antispam setchannel #ch` · `antispam logchannel #ch` · `antispam status`",
+    },
+    "owner": {
+        "label": "Owner Only", "emoji": "👑", "owner_only": True,
+        "value": (
+            "`maintenance on/off/status`\n"
+            "`noprefix grant/revoke/list`\n"
+            "`botrole set/remove/list`\n"
+            "`grantpremium @user <durasi>/revoke`\n"
+            "`premiumlock add/remove/list <command>`\n"
+            "`syncsupport`\n"
+            "`blacklist add/remove/list`\n"
+            "`vxleave <guild_id>`"
+        ),
+    },
+}
+
+def _visible_help_categories(is_owner_user: bool) -> dict:
+    return {k: v for k, v in HELP_CATEGORIES.items() if is_owner_user or not v.get("owner_only")}
+
+def build_help_home_embed(is_owner_user: bool, has_np: bool) -> discord.Embed:
+    cats  = _visible_help_categories(is_owner_user)
+    embed = discord.Embed(
+        title=f"{BOT_NAME} — Help Menu",
+        description=(
+            f"*{BOT_TAGLINE}*\n\n"
+            f"Prefix aku: **`!joy`** atau **`!j`**\n"
+            + ("✨ Kamu punya akses **no-prefix**!\n" if has_np else "")
+            + "\nPilih kategori di menu bawah buat lihat daftar command."
+        ),
+        color=COLOR_PRIMARY,
+        timestamp=discord.utils.utcnow()
+    )
+    for c in cats.values():
+        embed.add_field(name=f"{c['emoji']} {c['label']}", value="\u200b", inline=True)
+    embed.set_footer(text=BOT_NAME + " v" + BOT_VERSION + " • " + BOT_TAGLINE)
+    return embed
+
+def build_help_category_embed(key: str) -> discord.Embed:
+    c     = HELP_CATEGORIES[key]
+    embed = discord.Embed(
+        title=f"{c['emoji']} {c['label']} Commands",
+        description=c["value"],
+        color=COLOR_PRIMARY,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=BOT_NAME + " v" + BOT_VERSION + " • " + BOT_TAGLINE)
+    return embed
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, is_owner_user: bool):
+        options = [
+            discord.SelectOption(label=c["label"], value=k, emoji=c["emoji"])
+            for k, c in _visible_help_categories(is_owner_user).items()
+        ]
+        super().__init__(placeholder="❯ Pilih kategori", options=options, custom_id="vx_help_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "HelpView" = self.view
+        if interaction.user.id != view.author_id:
+            return await interaction.response.send_message(
+                embed=error_embed("Menu ini bukan buat kamu — ketik `!joy help` sendiri ya."), ephemeral=True)
+        await interaction.response.edit_message(embed=build_help_category_embed(self.values[0]), view=view)
+
+class HelpHomeButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Home", style=discord.ButtonStyle.secondary, row=1, custom_id="vx_help_home")
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "HelpView" = self.view
+        if interaction.user.id != view.author_id:
+            return await interaction.response.send_message(
+                embed=error_embed("Menu ini bukan buat kamu — ketik `!joy help` sendiri ya."), ephemeral=True)
+        embed = build_help_home_embed(view.is_owner_user, view.has_np)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class HelpView(discord.ui.View):
+    def __init__(self, author_id: int, is_owner_user: bool, has_np: bool, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.author_id     = author_id
+        self.is_owner_user = is_owner_user
+        self.has_np        = has_np
+        self.message: Optional[discord.Message] = None
+        self.add_item(HelpSelect(is_owner_user))
+        self.add_item(HelpHomeButton())
+        if SUPPORT_INVITE:
+            self.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_INVITE, row=1))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+def _resolve_np_status(guild: Optional[discord.Guild], user: discord.abc.User, is_owner_user: bool) -> bool:
+    np_users  = cfg.get("no_prefix_users",  [])
+    np_guilds = cfg.get("no_prefix_guilds", [])
+    return (is_owner_user or user.id in np_users or (guild and guild.id in np_guilds)
+            or user_has_premium(guild, user))
+
+@bot.command(name="help", aliases=["h", "commands"])
+async def pfx_help(ctx):
+    is_owner_user = (ctx.author.id == bot.owner_id)
+    has_np        = _resolve_np_status(ctx.guild, ctx.author, is_owner_user)
+    view          = HelpView(ctx.author.id, is_owner_user, has_np)
+    view.message  = await ctx.send(embed=build_help_home_embed(is_owner_user, has_np), view=view)
+
+# ══════════════════════════════════════════════════════════════════
+# SLASH COMMANDS
+# ══════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="createvent", description="Buat scheduled event Discord baru.")
+@app_commands.describe(
+    name="Nama event",
+    starts_in="Kapan event mulai — contoh: 2h, 1d, 30m",
+    duration="Berapa lama event berlangsung — contoh: 3h, 1d (default: 2 jam)",
+    announce_channel="Text channel buat kirim notifikasi/pengumuman event (default: channel ini)",
+    voice_channel="Voice/Stage channel, isi kalau event-nya beneran di voice (opsional)",
+    description="Deskripsi event (opsional)",
+    button_url="URL tombol link di embed pengumuman (opsional, harus diawali http/https). Kosongkan kalau tidak perlu tombol",
+    button_label="Label tombol link (opsional, default: 'Selengkapnya')"
+)
+async def slash_createvent(
+    i: discord.Interaction,
+    name: str,
+    starts_in: str,
+    duration: Optional[str] = None,
+    announce_channel: Optional[discord.TextChannel] = None,
+    voice_channel: Optional[discord.VoiceChannel] = None,
+    description: Optional[str] = None,
+    button_url: Optional[str] = None,
+    button_label: Optional[str] = None
+):
+    if i.user.id != bot.owner_id and not i.user.guild_permissions.manage_events:
+        return await i.response.send_message(embed=error_embed(t(cfg, i.guild.id, "no_perm")), ephemeral=True)
+    await i.response.defer()
+    target_announce = announce_channel or i.channel
+    _, embed = await _create_scheduled_event(
+        i.guild, name, starts_in, target_announce, description, voice_channel, duration,
+        button_url, button_label
+    )
+    await i.followup.send(embed=embed)
+
+@bot.tree.command(name="userinfo", description="Lihat info lengkap tentang member.")
+@app_commands.describe(member="Member yang ingin dilihat infonya")
+async def slash_userinfo(i: discord.Interaction, member: Optional[discord.Member] = None):
+    await do_userinfo(i.guild, member or i.user, i.response.send_message)
+
+@bot.tree.command(name="avatar", description="Lihat avatar member.")
+@app_commands.describe(member="Member yang ingin dilihat avatarnya")
+async def slash_avatar(i: discord.Interaction, member: Optional[discord.Member] = None):
+    await do_avatar(member or i.user, i.response.send_message)
+
+@bot.tree.command(name="serverinfo", description="Lihat info server.")
+async def slash_serverinfo(i: discord.Interaction):
+    g = i.guild
+    embed = discord.Embed(title=g.name, description=g.description or "", color=COLOR_PRIMARY, timestamp=discord.utils.utcnow())
+    if g.icon: embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="Owner",      value=f"<@{g.owner_id}>",                    inline=True)
+    embed.add_field(name="Members",    value=f"{g.member_count:,}",                  inline=True)
+    embed.add_field(name="Created",    value=g.created_at.strftime("%d %b %Y"),       inline=True)
+    embed.add_field(name="Channels",   value=str(len(g.text_channels)),               inline=True)
+    embed.add_field(name="Roles",      value=str(len(g.roles)),                       inline=True)
+    embed.add_field(name="Boost Tier", value=str(g.premium_tier),                     inline=True)
+    embed.set_footer(text=f"{BOT_NAME} • ID: {g.id}")
+    await i.response.send_message(embed=embed)
+
+@bot.tree.command(name="ping", description="Cek latency bot.")
+async def slash_ping(i: discord.Interaction):
+    lat = round(bot.latency * 1000)
+    await i.response.send_message(embed=base_embed("Pong!", f"Latency: **{lat}ms**", COLOR_SUCCESS if lat < 100 else COLOR_WARNING))
+
+@bot.tree.command(name="help", description="Lihat semua command JOY UNIVERSE.")
+async def slash_help(i: discord.Interaction):
+    is_owner_user = (i.user.id == bot.owner_id)
+    has_np        = _resolve_np_status(i.guild, i.user, is_owner_user)
+    view          = HelpView(i.user.id, is_owner_user, has_np)
+    await i.response.send_message(embed=build_help_home_embed(is_owner_user, has_np), view=view, ephemeral=True)
+    view.message = await i.original_response()
+
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    support_server_id = int(os.getenv("SUPPORT_SERVER_ID", "0"))
+    if member.guild.id != support_server_id or member.bot:
+        return
+    uid = member.id
+    # Grant badge USER saat join support server
+    support_members = cfg.setdefault("support_server_members", [])
+    if uid not in support_members:
+        support_members.append(uid)
+        save_config(cfg)
+    badges = get_user_badges(uid)
+    role   = get_bot_role(uid)
+    embed  = discord.Embed(
+        title="Selamat datang di " + member.guild.name + "!",
+        description="Halo " + member.mention + "!\n\nKamu baru saja mendapatkan badge **USER**!\n\nKetik `help` untuk lihat semua command.",
+        color=COLOR_PRIMARY,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    badge_lines = []
+    for b in badges:
+        info = BOT_ROLE_BADGES.get(b, BOT_ROLE_BADGES["user"])
+        badge_lines.append("\u2022 **" + info["label"] + "**")
+    embed.add_field(name="ALL BADGES", value="\n".join(badge_lines), inline=True)
+    embed.add_field(name="Bot Role", value=role.capitalize(), inline=True)
+    embed.set_footer(text=BOT_NAME + " \u2022 " + BOT_TAGLINE)
+    try:
+        await member.send(embed=embed)
+    except discord.Forbidden:
+        pass
+    gc = guild_cfg(cfg, member.guild.id)
+    main_ch_id = gc.get("main_channel") or gc.get("announce_channel")
+    if main_ch_id:
+        ch = member.guild.get_channel(main_ch_id)
+        if ch:
+            w = discord.Embed(description=member.mention + " bergabung!", color=COLOR_PRIMARY, timestamp=discord.utils.utcnow())
+            w.set_author(name=str(member), icon_url=member.display_avatar.url)
+            w.set_footer(text=BOT_NAME)
+            try:
+                await ch.send(embed=w)
+            except Exception:
+                pass
+
+@bot.tree.error
+async def on_app_command_error(i: discord.Interaction, error: app_commands.AppCommandError):
+    msg = str(error)
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = t(cfg, i.guild.id if i.guild else 0, "no_perm")
+    try:
+        await i.response.send_message(embed=error_embed(msg), ephemeral=True)
+    except discord.InteractionResponded:
+        try:
+            await i.followup.send(embed=error_embed(msg), ephemeral=True)
+        except Exception:
+            pass
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send(embed=error_embed("Kamu tidak punya akses ke command ini."), delete_after=5)
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(embed=error_embed(f"Argumen kurang: `{error.param.name}`"), delete_after=5)
+        return
+    if isinstance(error, commands.BadArgument):
+        await ctx.send(embed=error_embed(f"Argumen tidak valid: {error}"), delete_after=5)
+        return
+    logging.error(f"[{BOT_NAME}] Command error: {error}")
+
+# ══════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN environment variable is not set.")
+
+    async def main():
+        async with bot:
+            await bot.start(token)
+
+    asyncio.run(main())
