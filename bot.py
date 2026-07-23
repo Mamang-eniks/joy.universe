@@ -1,7 +1,7 @@
 """
 JOY UNIVERSE — Discord Moderation Bot
 Author  : Niks. (Founder)
-Version : 2.0.2
+Version : 1.1.1
 
 "No mercy. No limits. Full control."
 
@@ -49,8 +49,8 @@ from emoji_config import (
 # ══════════════════════════════════════════════════════════════════
 
 BOT_NAME      = "JOY UNIVERSE"
-BOT_TAGLINE   = "Nicturne Development."
-BOT_VERSION   = "2.0.2"
+BOT_TAGLINE   = "Nocturne Development."
+BOT_VERSION   = "1.1.1"
 BOT_PREFIX    = "!joy "
 CONFIG_PATH   = "data/config.json"
 WIB           = pytz.timezone("Asia/Jakarta")
@@ -1393,13 +1393,89 @@ _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 def _valid_url(url: str) -> bool:
     return bool(url) and bool(_URL_RE.match(url.strip()))
 
+_EVENT_STATUS_META = {
+    "scheduled": {"icon": "📅", "label": "Akan Datang",        "color": COLOR_PRIMARY},
+    "active":    {"icon": "🔴", "label": "SEDANG BERLANGSUNG", "color": 0xED4245},
+    "completed": {"icon": "✅", "label": "Telah Berakhir",     "color": 0x4B5563},
+    "cancelled": {"icon": "❌", "label": "Dibatalkan",         "color": 0x4B5563},
+}
+
+def _build_event_status_embed(status: str, name: str, description: Optional[str],
+                               start_time: datetime.datetime, end_time: datetime.datetime,
+                               location_str: Optional[str], event_url: str) -> discord.Embed:
+    """Satu builder dipakai bareng: pas event dibuat, pas mulai (live), dan pas berakhir/dibatalkan."""
+    meta  = _EVENT_STATUS_META.get(status, _EVENT_STATUS_META["scheduled"])
+    embed = discord.Embed(
+        title=f"{meta['icon']} {name}",
+        description=(description.strip() if description else "*Tidak ada deskripsi tambahan.*"),
+        color=meta["color"],
+    )
+    embed.add_field(name="\u200b", value="▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", inline=False)
+    embed.add_field(name="🕒 Mulai",   value=discord.utils.format_dt(start_time, "f"), inline=True)
+    embed.add_field(name="🕔 Selesai", value=discord.utils.format_dt(end_time, "t"), inline=True)
+    if location_str:
+        embed.add_field(name="📍 Lokasi", value=location_str, inline=True)
+    embed.add_field(name="📌 Status", value=f"**{meta['label']}**", inline=True)
+    embed.add_field(name="🔗 Info & RSVP", value=f"[Klik di sini]({event_url})", inline=True)
+    embed.set_footer(text=f"{BOT_NAME} • {BOT_TAGLINE}")
+    embed.timestamp = start_time
+    return embed
+
+async def _update_event_announcement(guild_scheduled_event, status: str):
+    """Dipanggil dari listener saat status native Discord event berubah (mulai/berakhir/dibatalkan)."""
+    record = cfg.get("event_messages", {}).get(str(guild_scheduled_event.id))
+    if not record:
+        return
+    channel = bot.get_channel(record["channel_id"])
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(record["channel_id"])
+        except Exception:
+            return
+    try:
+        msg = await channel.fetch_message(record["message_id"])
+    except Exception:
+        return
+    try:
+        start_time = datetime.datetime.fromisoformat(record["start_iso"])
+        end_time   = datetime.datetime.fromisoformat(record["end_iso"])
+    except Exception:
+        return
+    embed = _build_event_status_embed(
+        status, record.get("name", guild_scheduled_event.name), record.get("description"),
+        start_time, end_time, record.get("location_str"), guild_scheduled_event.url
+    )
+    try:
+        await msg.edit(embed=embed)
+    except Exception:
+        pass
+    if status in ("completed", "cancelled"):
+        cfg.get("event_messages", {}).pop(str(guild_scheduled_event.id), None)
+        save_config(cfg)
+
+@bot.event
+async def on_scheduled_event_update(before: discord.ScheduledEvent, after: discord.ScheduledEvent):
+    if before.status == after.status:
+        return
+    if after.status == discord.EventStatus.active:
+        await _update_event_announcement(after, "active")
+    elif after.status == discord.EventStatus.completed:
+        await _update_event_announcement(after, "completed")
+    elif after.status == discord.EventStatus.canceled:
+        await _update_event_announcement(after, "cancelled")
+
+@bot.event
+async def on_scheduled_event_delete(event: discord.ScheduledEvent):
+    await _update_event_announcement(event, "cancelled")
+
 async def _create_scheduled_event(guild: discord.Guild, name: str, starts_in: str,
                                    announce_channel: Optional[discord.TextChannel],
                                    description: Optional[str],
                                    voice_channel: Optional[discord.abc.GuildChannel] = None,
                                    duration_str: Optional[str] = None,
                                    button_url: Optional[str] = None,
-                                   button_label: Optional[str] = None):
+                                   button_label: Optional[str] = None,
+                                   mention_everyone: bool = True):
     """
     Bikin native Discord Scheduled Event, DAN kirim notifikasi/pengumumannya
     ke text channel biasa (announce_channel) — bukan cuma nongol di tab Events doang.
@@ -1407,6 +1483,8 @@ async def _create_scheduled_event(guild: discord.Guild, name: str, starts_in: st
     duration_str opsional (format sama seperti starts_in, misal "3h") — kalau kosong, default 2 jam.
     button_url opsional — kalau diisi dan valid (http/https), embed pengumuman dapat tombol
     link yang bisa diklik. Kalau kosong atau tidak valid, tombol otomatis tidak ditampilkan.
+    mention_everyone — kalau True (default), notifikasi ke channel nge-tag @everyone.
+    Embed pengumuman bakal auto-update sendiri pas event mulai (LIVE) dan pas berakhir/dibatalkan.
     """
     delta_secs = _parse_duration_secs(starts_in)
     if delta_secs is None:
@@ -1454,49 +1532,54 @@ async def _create_scheduled_event(guild: discord.Guild, name: str, starts_in: st
     # ── Validasi tombol link (opsional) ─────────────────────────────────────
     has_button = _valid_url(button_url) if button_url else False
     label      = (button_label or "Selengkapnya").strip()[:80] or "Selengkapnya"
+    location_str = voice_channel.mention if is_voice_event else None
 
     # ── Kirim notifikasi/pengumuman ke text channel biasa ───────────────────
+    notif_status = "Tidak dikirim (channel tidak ditemukan)"
     if announce_channel:
-        announce = discord.Embed(
-            title=f"📅 {event.name}",
-            description=(description.strip() if description else "*Tidak ada deskripsi tambahan.*"),
-            color=COLOR_PRIMARY,
+        announce = _build_event_status_embed(
+            "scheduled", event.name, description, start_time, end_time, location_str, event.url
         )
-        announce.add_field(name="\u200b", value="▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", inline=False)
-        announce.add_field(
-            name="🕒 Mulai",
-            value=discord.utils.format_dt(start_time, "F") + "\n" + discord.utils.format_dt(start_time, "R"),
-            inline=True
-        )
-        announce.add_field(
-            name="🕔 Selesai (perkiraan)",
-            value=discord.utils.format_dt(end_time, "F") + "\n" + discord.utils.format_dt(end_time, "R"),
-            inline=True
-        )
-        if is_voice_event:
-            announce.add_field(name="📍 Lokasi", value=voice_channel.mention, inline=True)
-        announce.add_field(name="🔗 Info & RSVP", value=f"[Klik di sini]({event.url})", inline=True)
-        announce.set_footer(text=f"{BOT_NAME} • {BOT_TAGLINE}")
-        announce.timestamp = start_time  # timestamp embed mengikuti waktu mulai event
 
         view = None
         if has_button:
             view = discord.ui.View(timeout=None)
             view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=button_url.strip()))
 
+        content = "@everyone" if mention_everyone else None
+        allowed = discord.AllowedMentions(everyone=mention_everyone)
+
         try:
+            send_kwargs = {"embed": announce, "allowed_mentions": allowed}
+            if content:
+                send_kwargs["content"] = content
             if view:
-                await announce_channel.send(embed=announce, view=view)
-            else:
-                await announce_channel.send(embed=announce)
-        except Exception:
-            pass
+                send_kwargs["view"] = view
+            sent_msg = await announce_channel.send(**send_kwargs)
+            notif_status = f"✅ Terkirim ke {announce_channel.mention}" + (" (tag @everyone)" if mention_everyone else "")
+
+            # Simpan referensi pesan biar embed-nya bisa auto-update pas event mulai/berakhir
+            cfg.setdefault("event_messages", {})[str(event.id)] = {
+                "channel_id":   announce_channel.id,
+                "message_id":   sent_msg.id,
+                "guild_id":     guild.id,
+                "name":         event.name,
+                "description":  description,
+                "start_iso":    start_time.isoformat(),
+                "end_iso":      end_time.isoformat(),
+                "location_str": location_str,
+            }
+            save_config(cfg)
+        except discord.Forbidden:
+            notif_status = f"⚠️ Gagal kirim ke {announce_channel.mention} — bot gak punya permission **Send Messages**/**Embed Links** di sana."
+        except Exception as e:
+            notif_status = f"⚠️ Gagal kirim notifikasi: {e}"
 
     confirm = base_embed("Event Created", None, color=COLOR_SUCCESS)
     confirm.add_field(name="Nama",     value=event.name, inline=True)
-    confirm.add_field(name="Mulai",    value=discord.utils.format_dt(start_time, "R"), inline=True)
-    confirm.add_field(name="Selesai",  value=discord.utils.format_dt(end_time, "R"), inline=True)
-    confirm.add_field(name="Notifikasi", value=announce_channel.mention if announce_channel else "Tidak dikirim", inline=True)
+    confirm.add_field(name="Mulai",    value=discord.utils.format_dt(start_time, "f"), inline=True)
+    confirm.add_field(name="Selesai",  value=discord.utils.format_dt(end_time, "t"), inline=True)
+    confirm.add_field(name="Notifikasi", value=notif_status, inline=False)
     if button_url:
         confirm.add_field(
             name="Tombol Link",
@@ -1505,6 +1588,7 @@ async def _create_scheduled_event(guild: discord.Guild, name: str, starts_in: st
         )
     confirm.add_field(name="Link",     value=f"[Klik di sini]({event.url})", inline=False)
     return event, confirm
+
 
 @bot.command(name="event", aliases=["events", "ev"])
 async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
@@ -1518,10 +1602,11 @@ async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
         except ValueError:
             parts = rest.split()
 
-        # Tarik flag --duration dan --button dari mana pun posisinya, sisanya tetap positional
+        # Tarik flag --duration, --button, --silent dari mana pun posisinya, sisanya tetap positional
         duration_str  = None
         button_url    = None
         button_label  = None
+        silent        = False
         filtered = []
         idx = 0
         while idx < len(parts):
@@ -1537,6 +1622,9 @@ async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
                     idx += 3
                 else:
                     idx += 2
+            elif low_part == "--silent":
+                silent = True
+                idx += 1
             else:
                 filtered.append(parts[idx])
                 idx += 1
@@ -1544,11 +1632,12 @@ async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
 
         if len(parts) < 2:
             return await ctx.send(embed=error_embed(
-                'Usage: `event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]]`\n'
+                'Usage: `event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]] [--silent]`\n'
                 "`#channel` = text channel buat kirim notifikasi (default: channel ini).\n"
                 "Kalau isi `#channel` dengan voice/stage channel, event-nya bakal dibikin di situ.\n"
                 "`--duration` opsional buat atur berapa lama event berlangsung (default: 2 jam).\n"
                 "`--button` opsional buat nambahin tombol link di embed pengumuman (URL harus http/https). Kalau tidak diisi, tombol tidak muncul.\n"
+                "`--silent` opsional — notifikasi tetap dikirim tapi TANPA tag @everyone (default: tag @everyone).\n"
                 'Contoh: `event create "Movie Night" 2h #pengumuman "Nonton bareng!" --duration 3h --button https://example.com "Daftar Sekarang"`'
             ))
         name, starts_in = parts[0], parts[1]
@@ -1566,7 +1655,7 @@ async def pfx_event(ctx, sub: str = "", *, rest: str = ""):
 
         _, embed = await _create_scheduled_event(
             ctx.guild, name, starts_in, announce_channel, description, voice_channel, duration_str,
-            button_url, button_label
+            button_url, button_label, mention_everyone=not silent
         )
         await ctx.send(embed=embed)
 
@@ -2070,10 +2159,12 @@ HELP_CATEGORIES = {
     "event": {
         "label": "Scheduled Event", "emoji": "📅",
         "value": (
-            '`event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]]`\n'
+            '`event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]] [--silent]`\n'
             "`#channel` = text channel notifikasi (default: channel ini)\n"
             "`--duration` = lama event berlangsung (default: 2 jam)\n"
             "`--button` = tombol link opsional di embed pengumuman (kosongkan = tidak muncul)\n"
+            "`--silent` = notifikasi tanpa tag @everyone (default: tag @everyone)\n"
+            "Embed pengumuman auto-update sendiri pas event mulai (🔴 LIVE) & berakhir (✅)\n"
             "`event list` · `event cancel <event_id>`\n"
             "Slash: `/createvent`"
         ),
@@ -2113,7 +2204,7 @@ def _invite_url() -> Optional[str]:
         read_message_history=True, add_reactions=True, use_external_emojis=True,
         manage_messages=True, manage_channels=True, manage_roles=True, manage_events=True,
         manage_guild=True, manage_emojis_and_stickers=True, kick_members=True, ban_members=True,
-        moderate_members=True, move_members=True, connect=True,
+        moderate_members=True, move_members=True, connect=True, mention_everyone=True,
     )
     return discord.utils.oauth_url(bot.user.id, permissions=perms, scopes=("bot", "applications.commands"))
 
@@ -2267,7 +2358,8 @@ async def pfx_help(ctx):
     voice_channel="Voice/Stage channel, isi kalau event-nya beneran di voice (opsional)",
     description="Deskripsi event (opsional)",
     button_url="URL tombol link di embed pengumuman (opsional, harus diawali http/https). Kosongkan kalau tidak perlu tombol",
-    button_label="Label tombol link (opsional, default: 'Selengkapnya')"
+    button_label="Label tombol link (opsional, default: 'Selengkapnya')",
+    mention_everyone="Tag @everyone di notifikasi? (default: Ya)"
 )
 async def slash_createvent(
     i: discord.Interaction,
@@ -2278,7 +2370,8 @@ async def slash_createvent(
     voice_channel: Optional[discord.VoiceChannel] = None,
     description: Optional[str] = None,
     button_url: Optional[str] = None,
-    button_label: Optional[str] = None
+    button_label: Optional[str] = None,
+    mention_everyone: Optional[bool] = True
 ):
     if i.user.id != bot.owner_id and not i.user.guild_permissions.manage_events:
         return await i.response.send_message(embed=error_embed(t(cfg, i.guild.id, "no_perm")), ephemeral=True)
@@ -2286,7 +2379,7 @@ async def slash_createvent(
     target_announce = announce_channel or i.channel
     _, embed = await _create_scheduled_event(
         i.guild, name, starts_in, target_announce, description, voice_channel, duration,
-        button_url, button_label
+        button_url, button_label, mention_everyone=mention_everyone
     )
     await i.followup.send(embed=embed)
 
