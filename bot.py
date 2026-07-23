@@ -1,7 +1,7 @@
 """
 JOY UNIVERSE — Discord Moderation Bot
 Author  : Niks. (Founder)
-Version : 1.1.1
+Version : 1.0.0
 
 "No mercy. No limits. Full control."
 
@@ -38,7 +38,7 @@ from emoji_config import (
     BADGE_FOUNDER, BADGE_DEVELOPER, BADGE_MANAGEMENT, BADGE_STAFF,
     BADGE_PREMIUM, BADGE_NOPREFIX, BADGE_USER,
     ICON_TICKET_OPEN, ICON_TICKET_CLOSE, ICON_GIVEAWAY_REACT,
-    ICON_MODERATION, ICON_ROLE, ICON_INFO, ICON_TICKET,
+    ICON_MODERATION, ICON_ROLE, ICON_INFO, ICON_TICKET, ICON_EVENT,
     ICON_GIVEAWAY, ICON_ANTISPAM, ICON_OWNER,
     ICON_SUCCESS, ICON_ERROR, ICON_WARNING,
     ICON_WINNER, ICON_BADGES,
@@ -49,8 +49,8 @@ from emoji_config import (
 # ══════════════════════════════════════════════════════════════════
 
 BOT_NAME      = "JOY UNIVERSE"
-BOT_TAGLINE   = "Nocturne Development."
-BOT_VERSION   = "1.1.1"
+BOT_TAGLINE   = "No mercy. No limits. Full control."
+BOT_VERSION   = "1.0.0"
 BOT_PREFIX    = "!joy "
 CONFIG_PATH   = "data/config.json"
 WIB           = pytz.timezone("Asia/Jakarta")
@@ -1394,7 +1394,7 @@ def _valid_url(url: str) -> bool:
     return bool(url) and bool(_URL_RE.match(url.strip()))
 
 _EVENT_STATUS_META = {
-    "scheduled": {"icon": "📅", "label": "Akan Datang",        "color": COLOR_PRIMARY},
+    "scheduled": {"icon": ICON_EVENT if ICON_EVENT else "📅", "label": "Akan Datang",        "color": COLOR_PRIMARY},
     "active":    {"icon": "🔴", "label": "SEDANG BERLANGSUNG", "color": 0xED4245},
     "completed": {"icon": "✅", "label": "Telah Berakhir",     "color": 0x4B5563},
     "cancelled": {"icon": "❌", "label": "Dibatalkan",         "color": 0x4B5563},
@@ -2157,7 +2157,7 @@ HELP_CATEGORIES = {
         ),
     },
     "event": {
-        "label": "Scheduled Event", "emoji": "📅",
+        "label": "Scheduled Event", "emoji": ICON_EVENT if ICON_EVENT else "📅",
         "value": (
             '`event create "<nama>" <mulai_dalam> [#channel] ["<deskripsi>"] [--duration <durasi>] [--button <url> ["<label>"]] [--silent]`\n'
             "`#channel` = text channel notifikasi (default: channel ini)\n"
