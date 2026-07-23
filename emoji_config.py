@@ -35,15 +35,15 @@ BADGE_USER       = "<:emoji_52:1528959097259688006>"   # Emoji untuk badge USER
 # ══════════════════════════════════════════════════════════════════
 
 # Section headers di !vx help
-ICON_MODERATION  = "<:emoji_28:1528929786511228939>"   # Icon untuk section Moderation
-ICON_ROLE        = "<:emoji_33:1528929910100463666>"   # Icon untuk section Role & Voice
-ICON_INFO        = "<:emoji_49:1528947364189049012>"   # Icon untuk section Info
-ICON_TICKET      = "<:emoji_47:1528941765749510284>"   # Icon untuk section Ticket
+ICON_MODERATION  = "<:emoji_52:1529987703125442700>"   # Icon untuk section Moderation
+ICON_ROLE        = "<:emoji_58:1529987879802241034>"   # Icon untuk section Role & Voice
+ICON_INFO        = "<:emoji_51:1529987677850702055>"   # Icon untuk section Info
+ICON_TICKET      = "<:emoji_55:1529987766849376407>"   # Icon untuk section Ticket
 ICON_LEVEL       = "<:emoji_35:1528930032989372708>"   # Icon untuk section Level & XP
-ICON_GIVEAWAY    = "<:emoji_14:1527088695688302732>"   # Icon untuk section Giveaway
-ICON_ANTISPAM    = "<:emoji_44:1528941241453252638>"   # Icon untuk section Antispam
+ICON_GIVEAWAY    = "<:emoji_63:1529987959410004008>"   # Icon untuk section Giveaway
+ICON_ANTISPAM    = "<:emoji_63:1529987994742816900>"   # Icon untuk section Antispam
 ICON_LANGUAGE    = "<a:customize:1529656166617972938>"   # Icon untuk section Language
-ICON_OWNER       = "<:emoji_11:1527088601240961094>"   # Icon untuk section Owner Only
+ICON_OWNER       = "<:emoji_49:1529987523135410196>"   # Icon untuk section Owner Only
 
 # Status / result icons
 ICON_SUCCESS     = "<:emoji_37:1528930134349058248>"   # Icon sukses (checklist, dll)
