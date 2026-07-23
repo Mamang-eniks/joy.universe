@@ -1,7 +1,7 @@
 """
 JOY UNIVERSE — Discord Moderation Bot
 Author  : Niks. (Founder)
-Version : 1.0.0
+Version : 1.1.1
 
 "No mercy. No limits. Full control."
 
@@ -49,8 +49,8 @@ from emoji_config import (
 # ══════════════════════════════════════════════════════════════════
 
 BOT_NAME      = "JOY UNIVERSE"
-BOT_TAGLINE   = "No mercy. No limits. Full control."
-BOT_VERSION   = "1.0.0"
+BOT_TAGLINE   = "Nocturne Development."
+BOT_VERSION   = "1.1.1"
 BOT_PREFIX    = "!joy "
 CONFIG_PATH   = "data/config.json"
 WIB           = pytz.timezone("Asia/Jakarta")
@@ -870,7 +870,7 @@ async def rotate_status():
     statuses = [
         discord.Activity(type=discord.ActivityType.watching, name="every move."),
         discord.Activity(type=discord.ActivityType.listening, name="!joy help"),
-        discord.Activity(type=discord.ActivityType.playing, name="JOY UNIVERSE v1.0"),
+        discord.Activity(type=discord.ActivityType.playing, name="JOY UNIVERSE v1.1"),
         discord.Activity(type=discord.ActivityType.watching, name=f"{len(bot.guilds)} servers"),
     ]
     import random as _r
