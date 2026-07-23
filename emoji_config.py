@@ -1,5 +1,5 @@
-"""
-JOY CANNOT — Emoji Configuration
+r"""
+JOY UNIVERSE — Emoji Configuration
 ===================================
 Isi semua ID emoji dari server Discord lu di sini.
 
