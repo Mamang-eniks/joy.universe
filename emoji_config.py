@@ -36,7 +36,7 @@ BADGE_USER       = "<:emoji_52:1528959097259688006>"   # Emoji untuk badge USER
 
 # Section headers di !joy help
 ICON_MODERATION  = "<:emoji_52:1529987703125442700>"   # Icon untuk section Moderation
-ICON_ROLE        = "<:emoji_58:1529987879802241034>   # Icon untuk section Role & Voice
+ICON_ROLE        = "<:emoji_58:1529987879802241034>"   # Icon untuk section Role & Voice
 ICON_INFO        = "<:emoji_51:1529987677850702055>"   # Icon untuk section Info
 ICON_TICKET      = "<:emoji_55:1529987766849376407>"   # Icon untuk section Ticket
 ICON_EVENT       = "<:emoji_66:1529993877405040852>"   # Icon untuk section Scheduled Event — isi ID emoji lu, kosongkan = fallback 📅
